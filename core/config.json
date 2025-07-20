@@ -1,0 +1,8 @@
+{
+    "targets": [
+        "https://example1.com/page?param=",
+        "https://example2.com/search?q=",
+        "https://example3.com/profile?id="
+    ],
+    "payload_url": "https://your-control-node.com/veil.js"
+}
