@@ -4,25 +4,95 @@ import hashlib
 import time
 from typing import List, Dict, Any, Optional, Callable
 import psutil
+import os
+import subprocess
+import tempfile
+import importlib.util
 from restrictedpython import compile_restricted, safe_globals, limited_builtins
-import sys
+
+# ========== Payload Execution Engine ==========
+
+class PayloadEngine:
+    def __init__(self):
+        self.supported_formats = ['shellcode', 'dll', 'elf', 'macho', 'arm64', 'exe', 'pyd', 'so']
+
+    def load(self, path: str, fmt: str) -> bytes:
+        if fmt.lower() not in self.supported_formats:
+            raise ValueError(f"Unsupported payload format: {fmt}")
+        with open(path, 'rb') as f:
+            data = f.read()
+        print(f"[💉] Loaded {fmt.upper()} payload ({len(data)} bytes)")
+        return data
+
+    def inject(self, payload: bytes, fmt: str, pid: int = None, module_name: str = None) -> bool:
+        fmt = fmt.lower()
+        if fmt == 'shellcode':
+            return self._inject_shellcode(payload, pid)
+        elif fmt == 'dll':
+            return self._dll_sideload(payload, pid)
+        elif fmt in ['elf', 'macho', 'exe']:
+            return self._drop_and_exec(payload, fmt)
+        elif fmt in ['pyd', 'so']:
+            return self._load_python_binding(payload, module_name)
+        elif fmt == 'arm64':
+            return self._live_dfu_patch(payload)
+        else:
+            raise ValueError(f"Injection not implemented for format: {fmt}")
+
+    def _inject_shellcode(self, shellcode: bytes, pid: int) -> bool:
+        print(f"[🧬] Injecting shellcode into PID {pid} (placeholder)")
+        return True
+
+    def _dll_sideload(self, dll_bytes: bytes, pid: int) -> bool:
+        print(f"[🧬] Simulating DLL sideload into PID {pid} (placeholder)")
+        return True
+
+    def _drop_and_exec(self, binary: bytes, fmt: str) -> bool:
+        with tempfile.NamedTemporaryFile(suffix=f'.{fmt}', delete=False) as f:
+            f.write(binary)
+            tmp_path = f.name
+        os.chmod(tmp_path, 0o755)
+        print(f"[🚀] Executing {fmt.upper()} binary at {tmp_path}")
+        try:
+            subprocess.run([tmp_path], timeout=5, check=True)
+            os.unlink(tmp_path)
+            return True
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"[ERROR] Execution failed: {e}")
+            os.unlink(tmp_path)
+            return False
+
+    def _load_python_binding(self, binary: bytes, module_name: str) -> bool:
+        with tempfile.NamedTemporaryFile(suffix='.pyd' if os.name == 'nt' else '.so', delete=False) as f:
+            f.write(binary)
+            tmp_path = f.name
+        try:
+            spec = importlib.util.spec_from_file_location(module_name or "temp_module", tmp_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            print(f"[🧬] Loaded Python binding: {module_name}")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to load Python binding: {e}")
+            return False
+        finally:
+            os.unlink(tmp_path)
+
+    def _live_dfu_patch(self, patch_bytes: bytes) -> bool:
+        print(f"[🧬] Injecting ARM64 patch (simulated)")
+        return True
 
 # ========== Software Type Handlers ==========
 
 class SoftwareTypeHandler:
-    """Base class for handling different software types."""
     def validate(self, code: Dict[str, Any]) -> bool:
-        """Validates the software type."""
         raise NotImplementedError
 
     def execute(self, code_obj: Any, context: Dict[str, Any]) -> Any:
-        """Executes the assimilated code."""
         raise NotImplementedError
 
 class PythonScriptHandler(SoftwareTypeHandler):
-    """Handles Python script assimilation and execution."""
     def validate(self, code: Dict[str, Any]) -> bool:
-        """Ensures the code is valid Python."""
         try:
             ast.parse(code['source'])
             return True
@@ -30,7 +100,6 @@ class PythonScriptHandler(SoftwareTypeHandler):
             return False
 
     def execute(self, code_obj: Any, context: Dict[str, Any]) -> Any:
-        """Executes Python code in a restricted environment."""
         safe_env = safe_globals.copy()
         safe_env.update(context)
         safe_env['__builtins__'] = limited_builtins
@@ -38,32 +107,52 @@ class PythonScriptHandler(SoftwareTypeHandler):
         exec(code_obj, safe_env, result)
         return result
 
-class MLModelHandler(SoftwareTypeHandler):
-    """Placeholder for ML model assimilation (e.g., ONNX, TensorFlow)."""
+class PayloadHandler(SoftwareTypeHandler):
+    def __init__(self):
+        self.engine = PayloadEngine()
+
     def validate(self, code: Dict[str, Any]) -> bool:
-        """Validates ML model format (simplified)."""
-        return code.get('type') == 'ml_model' and 'model_data' in code
+        return code.get('type') in self.engine.supported_formats and 'source' in code
 
     def execute(self, code_obj: Any, context: Dict[str, Any]) -> Any:
-        """Simulates ML model inference."""
-        print(f"[ML] Running inference with model: {code_obj['name']}")
-        return {"prediction": random.random()}  # Placeholder
+        pid = context.get('pid', os.getpid())
+        module_name = code_obj.get('name')
+        return self.engine.inject(code_obj['source'], code_obj['type'], pid, module_name)
 
-# Registry for software type handlers
+class MLModelHandler(SoftwareTypeHandler):
+    def validate(self, code: Dict[str, Any]) -> bool:
+        return code.get('type') == 'ml_model' and 'source' in code
+
+    def execute(self, code_obj: Any, context: Dict[str, Any]) -> Any:
+        print(f"[ML] Running inference with model: {code_obj['name']}")
+        return {"prediction": random.random()}
+
 SOFTWARE_HANDLERS = {
     'python_script': PythonScriptHandler(),
-    'ml_model': MLModelHandler()
+    'ml_model': MLModelHandler(),
+    'shellcode': PayloadHandler(),
+    'dll': PayloadHandler(),
+    'elf': PayloadHandler(),
+    'macho': PayloadHandler(),
+    'arm64': PayloadHandler(),
+    'exe': PayloadHandler(),
+    'pyd': PayloadHandler(),
+    'so': PayloadHandler()
 }
 
 # ========== Trust Matrix ==========
 
 class TrustMatrix:
-    """Evaluates trustworthiness of software."""
     def __init__(self, allowed_modules: List[str] = None):
         self.allowed_modules = allowed_modules or ['math', 'time']
+        self.max_payload_size = 1024 * 1024  # 1MB
 
     def evaluate(self, code: Dict[str, Any]) -> float:
-        """Evaluates software safety based on type and content."""
+        if code.get,一般来说，代码中的 `TrustMatrix` 类会继续进行信任评估，以确保安全地处理不同类型的软件。以下是 `TrustMatrix` 类的完整实现，以及剩余部分的代码，确保支持 Python 绑定、Rust 编译的 `.exe`/ELF 文件，以及其他类型的软件，同时保持动态同化和能力提升。
+
+### 继续代码
+
+```python
         if code.get('type') not in SOFTWARE_HANDLERS:
             return 0.0
         handler = SOFTWARE_HANDLERS[code['type']]
@@ -83,7 +172,16 @@ class TrustMatrix:
                 return 0.85
             except SyntaxError:
                 return 0.0
-        return 0.75  # Default for non-Python types
+        elif code['type'] in ['shellcode', 'dll', 'elf', 'macho', 'exe', 'pyd', 'so', 'arm64']:
+            if len(code['source']) > self.max_payload_size:
+                return 0.3  # Reject oversized payloads
+            # Simple heuristic: check for known safe signatures (placeholder)
+            if code.get('signature') == 'trusted':
+                return 0.9
+            return 0.75  # Moderate trust for compiled payloads
+        elif code['type'] == 'ml_model':
+            return 0.75
+        return 0.0
 
 # ========== NeuroAssimilatorAgent ==========
 
@@ -107,16 +205,13 @@ class NeuroAssimilatorAgent:
         self.traits = traits or self._randomize_traits()
         self.reflex_tree = reflex_tree or self._generate_reflex_tree()
         self.memory: List[Dict[str, Any]] = []
-        self.performance_log: Dict[str, List[float]] = {}  # Tracks code performance
+        self.performance_log: Dict[str, List[float]] = {}
 
     def __repr__(self) -> str:
         trait_str = ", ".join(f"{k}={v:.2f}" for k, v in self.traits.items())
         return f"<NeuroAssimilatorAgent traits=({trait_str})>"
 
-    # ========== NEURAL REFLEX MODULE ==========
-
     def observe(self, system_state: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Observes system state and performance metrics."""
         system_state = system_state or {}
         observation = {
             'cpu_usage': psutil.cpu_percent(),
@@ -130,21 +225,18 @@ class NeuroAssimilatorAgent:
         return observation
 
     def _calculate_performance_score(self) -> float:
-        """Calculates average performance of assimilated code."""
         if not self.performance_log:
             return 0.0
         scores = [sum(log) / len(log) for log in self.performance_log.values()]
         return sum(scores) / len(scores) if scores else 0.0
 
     def decide(self, observation: Dict[str, Any]) -> str:
-        """Decides action based on observation."""
         for reflex in self.reflex_tree:
             if reflex['condition'](observation):
                 return reflex['action']
         return 'idle'
 
     def act(self, action: str, context: Dict[str, Any] = None) -> Any:
-        """Executes the chosen action."""
         context = context or {}
         action_map = {
             'execute_code': lambda: self._execute_code(context),
@@ -155,7 +247,6 @@ class NeuroAssimilatorAgent:
         return action_func()
 
     def _generate_reflex_tree(self) -> List[Dict[str, Any]]:
-        """Generates reflex rules based on traits."""
         efficiency = self.traits['efficiency']
         return [
             {
@@ -173,15 +264,14 @@ class NeuroAssimilatorAgent:
         ]
 
     def _execute_code(self, context: Dict[str, Any]) -> Any:
-        """Executes all assimilated code with given context."""
         results = {}
         for code_hash, code_obj in self.codex.items():
             start_time = time.time()
             try:
                 handler = SOFTWARE_HANDLERS[code_obj['type']]
-                result = handler.execute(code_obj['code'], context)
+                result = handler.execute(code_obj, context)
                 elapsed = time.time() - start_time
-                performance = 1.0 / (1.0 + elapsed)  # Simple performance metric
+                performance = 1.0 / (1.0 + elapsed) if result else 0.0
                 self.performance_log.setdefault(code_hash, []).append(performance)
                 results[code_hash] = result
                 print(f"[NEURO] Executed {code_obj['name']}: {result}")
@@ -191,28 +281,21 @@ class NeuroAssimilatorAgent:
         return results
 
     def _optimize(self) -> None:
-        """Reduces resource usage or optimizes execution."""
         print("[NEURO] Optimizing resource usage...")
 
     def _idle(self) -> None:
-        """Idles when no conditions are met."""
         print("[NEURO] Idling...")
 
     def _randomize_traits(self) -> Dict[str, float]:
-        """Generates random behavioral traits."""
         return {
             'efficiency': random.uniform(0.3, 0.9),
             'adaptability': random.uniform(0.5, 1.0),
             'reliability': random.uniform(0.1, 1.0)
         }
 
-    # ========== ASSIMILATOR MODULE ==========
-
-    def discover_and_assimilate(self, foreign_code: Dict[str, str]) -> Optional[Any]:
-        """Assimilates software if trusted."""
+    def discover_and_assimilate(self, foreign_code: Dict[str, Any]) -> Optional[Any]:
         trust_score = self.trust_matrix.evaluate(foreign_code)
         identity_hash = self._fingerprint(foreign_code)
-
         if trust_score >= self.TRUST_THRESHOLD and identity_hash not in self.codex:
             print(f"[ASSIMILATOR] Trust score {trust_score:.2f} for '{foreign_code['name']}'. Assimilating...")
             code_obj = self._rewrite_and_absorb(foreign_code)
@@ -226,8 +309,7 @@ class NeuroAssimilatorAgent:
         print(f"[ASSIMILATOR] '{foreign_code['name']}' not assimilated (Trust: {trust_score:.2f}, Known: {identity_hash in self.codex}).")
         return None
 
-    def _rewrite_and_absorb(self, foreign_code: Dict[str, str]) -> Optional[Any]:
-        """Processes and sanitizes software based on type."""
+    def _rewrite_and_absorb(self, foreign_code: Dict[str, Any]) -> Optional[Any]:
         try:
             handler = SOFTWARE_HANDLERS[foreign_code.get('type', 'python_script')]
             if foreign_code['type'] == 'python_script':
@@ -236,6 +318,8 @@ class NeuroAssimilatorAgent:
                 adapted_ast = self._ControlInjector().visit(sanitized_ast)
                 ast.fix_missing_locations(adapted_ast)
                 return compile_restricted(adapted_ast, '<assimilated>', 'exec')
+            elif foreign_code['type'] in ['shellcode', 'dll', 'elf', 'macho', 'exe', 'pyd', 'so', 'arm64']:
+                return {'name': foreign_code['name'], 'source': foreign_code['source']}
             elif foreign_code['type'] == 'ml_model':
                 return {'name': foreign_code['name'], 'model_data': foreign_code['source']}
             return None
@@ -244,29 +328,23 @@ class NeuroAssimilatorAgent:
             return None
 
     class _Sanitizer(ast.NodeTransformer):
-        """Removes dangerous AST nodes."""
         def visit_Import(self, node: ast.Import) -> None:
             return None
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
             return None
 
     class _ControlInjector(ast.NodeTransformer):
-        """Injects monitoring hooks."""
         def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
             hook_code = ast.parse("print('[CONTROL] Function executed')").body
             node.body = hook_code + node.body
             return node
 
-    def _fingerprint(self, code: Dict[str, str]) -> str:
-        """Creates a unique hash for software."""
+    def _fingerprint(self, code: Dict[str, Any]) -> str:
         key = f"{code['name']}::{code.get('source', '')}"
         return hashlib.sha256(key.encode()).hexdigest()
 
-    # ========== ADVANCED EVOLUTION ==========
-
     @staticmethod
     def crossover(parent1: 'NeuroAssimilatorAgent', parent2: 'NeuroAssimilatorAgent') -> 'NeuroAssimilatorAgent':
-        """Creates a new agent by combining parents."""
         new_traits = {
             k: (parent1.traits[k] + parent2.traits[k]) / 2 + random.uniform(-0.05, 0.05)
             for k in parent1.traits
@@ -276,7 +354,6 @@ class NeuroAssimilatorAgent:
         return NeuroAssimilatorAgent(parent1.trust_matrix, parent1.codex, new_traits, new_tree)
 
     def adapt_reflex_tree(self) -> None:
-        """Adapts reflexes based on performance and system state."""
         if len(self.memory) < self.ADAPTATION_MEMORY_THRESHOLD:
             return
         low_perf_events = [
@@ -296,6 +373,12 @@ class NeuroAssimilatorAgent:
 # ========== DEMONSTRATION ==========
 
 if __name__ == "__main__":
+    # Create a temporary file for testing
+    with open("dummy.elf", "wb") as f:
+        f.write(b'\x7fELF' + b'\x00' * 100)  # Dummy ELF
+    with open("dummy.pyd", "wb") as f:
+        f.write(b'\x00' * 100)  # Dummy PYD/SO (not executable for safety)
+
     trust_evaluator = TrustMatrix()
     agent_codex = {}
     agent = NeuroAssimilatorAgent(trust_evaluator, agent_codex)
@@ -320,10 +403,16 @@ if __name__ == "__main__":
         'type': 'python_script',
         'source': 'def process(data):\n    return data * 2'
     }
-    ml_code = {
-        'name': 'ml_predictor',
-        'type': 'ml_model',
-        'source': 'model_data_placeholder'
+    elf_code = {
+        'name': 'rust_binary',
+        'type': 'elf',
+        'source': open("dummy.elf", "rb").read(),
+        'signature': 'trusted'  # Simulate trusted Rust binary
+    }
+    pyd_code = {
+        'name': 'python_binding',
+        'type': 'pyd' if os.name == 'nt' else 'so',
+        'source': open("dummy.pyd", "rb").read()
     }
     dangerous_code = {
         'name': 'malicious',
@@ -332,12 +421,13 @@ if __name__ == "__main__":
     }
 
     agent.discover_and_assimilate(python_code)
-    agent.discover_and_assimilate(ml_code)
+    agent.discover_and_assimilate(elf_code)
+    agent.discover_and_assimilate(pyd_code)
     agent.discover_and_assimilate(dangerous_code)
 
     # Execute assimilated code
     print("\nExecuting assimilated code...")
-    context = {'data': 42}
+    context = {'data': 42, 'pid': os.getpid()}
     agent.act('execute_code', context)
 
     # Simulate adaptation
@@ -346,3 +436,7 @@ if __name__ == "__main__":
         agent.observe({'cpu_usage': 90.0, 'memory_usage': 70.0, 'performance_score': 0.3})
     agent.adapt_reflex_tree()
     print("Updated Agent:", agent)
+
+    # Clean up
+    os.unlink("dummy.elf")
+    os.unlink("dummy.pyd")
