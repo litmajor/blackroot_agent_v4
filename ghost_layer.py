@@ -652,3 +652,18 @@ def advanced_recon(target: str, max_depth: int = 3, scope_domains: Optional[List
     
     logger.info(f"Recon complete: {len(endpoints)} endpoints, {len(forms)} forms, {len(js_endpoints)} JS endpoints")
     return report
+
+ 
+    def load_recon_data(self, target: str, max_depth: int = 3, brute_subdomains: bool = True) -> dict:
+        try:
+            command_id = get_random_bytes(16).hex()
+            report = self.kernel.recon_module.advanced_recon(target, max_depth, None, brute_subdomains, command_id)
+            self.vault.store(f"recon_{target}_{command_id}", json.dumps(report).encode())
+            self.recon_data = report
+            self.logger.info(f"Loaded recon data for {target}: {len(report['endpoints'])} endpoints")
+            return report
+    except Exception as e:
+            self.logger.error(f"Failed to load recon data for {target}: {e}")
+            self.vault.store(f"recon_error_{time.time()}", 
+                        json.dumps({"target": target, "error": str(e)}).encode())
+            raise ValueError(f"Recon load failed: {e}")
