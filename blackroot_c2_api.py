@@ -43,3 +43,15 @@ def status():
 @app.get("/ping")
 def ping():
     return {"pong": True}
+
+
+@app.post("/recon")
+async def recon_command(request: Request):
+    command = await request.json()
+    target = command.get("target")
+    max_depth = command.get("max_depth", 3)
+    brute_subdomains = command.get("brute_subdomains", True)
+    command_id = command.get("command_id", get_random_bytes(16).hex())
+    recon_module = ReconModule(swarm.kernel.black_vault, swarm, swarm.redis)
+    result = recon_module.advanced_recon(target, max_depth, None, brute_subdomains, command_id)
+    return {"status": "completed", "command_id": command_id, "result": result}
