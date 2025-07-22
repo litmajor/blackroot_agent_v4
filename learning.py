@@ -27,16 +27,28 @@ class LearningAgent(BaseAgent):
                 print(f"[LEARN-MIND] Error in run loop: {e}")
                 time.sleep(self.analysis_interval)
 
+    # In LearningAgent._analyze
     def _analyze(self, logs):
         with self.stats_lock:
             for entry in logs:
                 if not entry:
                     continue
-                anomaly_class = entry.get("anomaly_class")
-                if isinstance(anomaly_class, dict):
-                    anomaly_type = anomaly_class.get("type")
-                    if anomaly_type:
-                        self.anomaly_stats[anomaly_type] = self.anomaly_stats.get(anomaly_type, 0) + 1
+                anomaly_class = entry.get("anomaly_class", {})
+                anomaly_type = anomaly_class.get("type")
+                if anomaly_type:
+                    self.anomaly_stats[anomaly_type] = self.anomaly_stats.get(anomaly_type, 0) + 1
+            try:
+                for artifact in self.kernel.black_vault.list_artifacts():
+                    if any(x in artifact for x in ["recon_", "injection_", "form_", "xss_"]):
+                        data = self.kernel.black_vault.retrieve(artifact)
+                        recon = json.loads(data.decode())
+                        if recon.get('secrets'):
+                           self.anomaly_stats['secrets_found'] += len(recon['secrets'])
+                        if recon.get('xss_results'):
+                            self.anomaly_stats['xss_vulnerabilities'] += sum(1 for r in recon['xss_results'].values() if r)
+                        self.logger.info(f"Analyzed artifact: {artifact}")
+            except Exception as e:
+                self.logger.error(f"Failed to analyze artifacts: {e}")
 
     def _adjust_response_model(self):
         print("[LEARN-MIND] Adapting based on observed trends:")
