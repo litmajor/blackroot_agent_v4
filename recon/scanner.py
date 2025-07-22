@@ -15,6 +15,8 @@ from bs4.element import Tag
 from typing import Optional, List, Dict
 import dnstwist
 from Crypto.Random import get_random_bytes
+from fastapi import FastAPI
+from redis import Redis
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -33,22 +35,27 @@ PROXY_POOL = [
 ]
 
 class ReconModule:
-    """Performs advanced web reconnaissance with BlackVault integration."""
+    """Performs advanced web reconnaissance with BlackVault and SwarmMesh integration."""
     
-    def __init__(self, vault, logger: logging.Logger = None):
+    def __init__(self, vault, swarm: 'SwarmMesh', redis: Redis, logger: logging.Logger = None):
         """
-        Initializes the recon module with BlackVault for secure storage.
+        Initializes the recon module with BlackVault and SwarmMesh.
         
         Args:
             vault: BlackVault instance for storing results.
+            swarm: SwarmMesh instance for command distribution.
+            redis: Redis instance for Pub/Sub.
             logger: Optional custom logger (defaults to 'ReconModule').
         """
         self.vault = vault
+        self.swarm = swarm
+        self.redis = redis
         self.logger = logger or logging.getLogger('ReconModule')
         self.lock = threading.Lock()
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "BLACKROOT.Recon-Agent"})
         self.form_cache = self._load_form_cache()
+        self.command_id = None
 
     def _save_form_cache(self):
         """Saves form cache to BlackVault."""
@@ -108,21 +115,24 @@ class ReconModule:
                 pass
 
         try:
-            # Brute-force subdomains
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                 executor.map(check_subdomain, wordlist)
-            
-            # External sources
             found.update(fetch_crtsh_subdomains(domain))
             found.update(fetch_certspotter_subdomains(domain))
             found.update(dnstwist_permutations(domain))
             
-            self.vault.store(f"subdomains_{domain}", json.dumps(list(found)).encode())
+            self.vault.store(f"subdomains_{domain}_{self.command_id}", json.dumps(list(found)).encode())
+            self.redis.publish(self.swarm.channel, json.dumps({
+                "command_id": self.command_id,
+                "type": "subdomains",
+                "data": list(found)
+            }))
             self.logger.info(f"Found {len(found)} subdomains for {domain}")
             return list(found)
         except Exception as e:
             self.logger.error(f"Subdomain enumeration failed for {domain}: {e}")
-            self.vault.store(f"subdomain_error_{time.time()}", json.dumps({"domain": domain, "error": str(e)}).encode())
+            self.vault.store(f"subdomain_error_{time.time()}", 
+                            json.dumps({"domain": domain, "error": str(e), "command_id": self.command_id}).encode())
             return []
 
     def brute_force_paths(self, target: str, wordlist: Optional[List[str]] = None, threads: int = 10) -> List[str]:
@@ -144,7 +154,8 @@ class ReconModule:
         found = []
         base_len = None
         try:
-            base = self.session.get(target, headers=self._get_random_headers(), timeout=8, verify=False)
+            base = self.session.get(target, headers=self._get_random_headers(), timeout=8, 
+                                  proxies=self._get_random_proxy(), verify=False)
             base_len = len(base.content)
         except Exception:
             self.logger.warning(f"Failed to get base content length for {target}")
@@ -166,7 +177,12 @@ class ReconModule:
         with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
             found = [r for r in executor.map(check_path, wordlist) if r]
         
-        self.vault.store(f"paths_{target}", json.dumps(found).encode())
+        self.vault.store(f"paths_{target}_{self.command_id}", json.dumps(found).encode())
+        self.redis.publish(self.swarm.channel, json.dumps({
+            "command_id": self.command_id,
+            "type": "paths",
+            "data": found
+        }))
         self.logger.info(f"Found {len(found)} paths for {target}")
         return found
 
@@ -181,7 +197,7 @@ class ReconModule:
         Returns:
             tuple: (injection results, form map).
         """
-        FORM_PAYLOADS = ["test_input", "user_{}".format(random.randint(1000, 9999)), "data"]  # Safe payloads
+        FORM_PAYLOADS = ["test_input", f"user_{random.randint(1000, 9999)}", "data"]
         results = {}
         
         with self.lock:
@@ -225,10 +241,15 @@ class ReconModule:
                 except Exception as e:
                     self.logger.error(f"Form harvest error at {url}: {e}")
                     self.vault.store(f"form_error_{time.time()}", 
-                                    json.dumps({"url": url, "error": str(e)}).encode())
+                                    json.dumps({"url": url, "error": str(e), "command_id": self.command_id}).encode())
         
         self._save_form_cache()
-        self.vault.store(f"form_results_{time.time()}", json.dumps(results).encode())
+        self.vault.store(f"form_results_{time.time()}_{self.command_id}", json.dumps(results).encode())
+        self.redis.publish(self.swarm.channel, json.dumps({
+            "command_id": self.command_id,
+            "type": "forms",
+            "data": results
+        }))
         self.logger.info(f"Harvested {len(self.form_cache)} forms, tested {len(results)}")
         return results, self.form_cache
 
@@ -243,7 +264,7 @@ class ReconModule:
         Returns:
             Dict[str, bool]: XSS scan results.
         """
-        XSS_PAYLOADS = ["<test>", "user_{}".format(random.randint(1000, 9999)), "data"]  # Safe payloads
+        XSS_PAYLOADS = ["<test>", f"user_{random.randint(1000, 9999)}", "data"]
         results = {}
         
         def scan_url(url: str) -> bool:
@@ -263,7 +284,12 @@ class ReconModule:
         for url in endpoints:
             results[url] = scan_url(url)
         
-        self.vault.store(f"xss_results_{time.time()}", json.dumps(results).encode())
+        self.vault.store(f"xss_results_{time.time()}_{self.command_id}", json.dumps(results).encode())
+        self.redis.publish(self.swarm.channel, json.dumps({
+            "command_id": self.command_id,
+            "type": "xss",
+            "data": results
+        }))
         self.logger.info(f"XSS scan completed for {len(endpoints)} endpoints")
         return results
 
@@ -309,19 +335,21 @@ class ReconModule:
         return list(tech)
 
     def advanced_recon(self, target: str, max_depth: int = 3, scope_domains: Optional[List[str]] = None, 
-                      brute_subdomains: bool = True) -> Dict:
+                      brute_subdomains: bool = True, command_id: Optional[str] = None) -> Dict:
         """
-        Performs advanced reconnaissance with BlackVault storage.
+        Performs advanced reconnaissance with BlackVault and SwarmMesh integration.
         
         Args:
             target: Target URL.
             max_depth: Maximum crawl depth.
             scope_domains: List of domains to scope the crawl.
             brute_subdomains: Enable subdomain brute-forcing.
+            command_id: Optional command ID from C2.
         
         Returns:
             Dict: Recon report.
         """
+        self.command_id = command_id or get_random_bytes(16).hex()
         visited = set()
         endpoints = set()
         forms = []
@@ -416,13 +444,13 @@ class ReconModule:
                             crawl(absolute, depth + 1)
             except Exception as e:
                 self.logger.error(f"Crawl failed for {url}: {e}")
-                time.sleep(random.uniform(2, 10) + random.uniform(0.5, 2.5))
+                self.vault.store(f"crawl_error_{time.time()}", 
+                                json.dumps({"url": url, "error": str(e), "command_id": self.command_id}).encode())
 
         for path in ["admin", "login", "dashboard", "api", "robots.txt", "sitemap.xml"]:
             crawl(urljoin(target, path), 1)
         crawl(target, 1)
 
-        # Harvest forms and scan for XSS
         form_results, form_map = self.harvest_and_inject_forms(list(endpoints), target)
         xss_results = self.scan_for_xss(target, list(endpoints))
         
@@ -434,9 +462,15 @@ class ReconModule:
         report['technologies'] = list(tech)
         report['form_results'] = form_results
         report['xss_results'] = xss_results
+        report['command_id'] = self.command_id
         
         try:
-            self.vault.store(f"recon_{target}_{time.time()}", json.dumps(report).encode())
+            self.vault.store(f"recon_{target}_{self.command_id}", json.dumps(report).encode())
+            self.redis.publish(self.swarm.channel, json.dumps({
+                "command_id": self.command_id,
+                "type": "recon_report",
+                "data": report
+            }))
             self.logger.info(f"Recon complete: {len(endpoints)} endpoints, {len(forms)} forms, {len(js_endpoints)} JS endpoints")
         except Exception as e:
             self.logger.error(f"Failed to store recon report: {e}")
