@@ -16,6 +16,7 @@ from swarm_mesh import SwarmMesh
 from anomaly_classifier import AnomalyClassifierDaemon
 from payload_engine import PayloadEngine
 from mutator_engine import MutatorEngine
+from recon import ReconModule
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -46,15 +47,23 @@ class BlackrootKernel:
             self.stealth = CloakSupervisor(self, stealth_threshold=config.get('stealth_threshold', 0.8))
             self.behaviour = BehaviorAdapter(self)
             self.mirrorcore = MirrorCore(self)
-            self.ghost_layer = GhostLayerDaemon()
-            self.black_vault = BlackVault(config.get('vault_path', 'vault.bkr'))
-            self.swarm = SwarmMesh(self.id)
             self.anomaly_classifier = AnomalyClassifierDaemon()
             self.payload_engine = PayloadEngine()
             self.mutator_engine = MutatorEngine()
-        except Exception as e:
-            self.logger.error(f"Initialization failed: {e}")
-            raise
+
+            self.black_vault = BlackVault(
+password=self.config.get('vault_password', get_random_bytes(32).hex()),
+ rotate_days=self.config.get('vault_rotate_days', 7),
+    vault_path=self.config.get('vault_path', 'vault.bkr')
+)
+            self.swarm = SwarmMesh("controller-node")
+            self.swarm.redis = Redis(host="localhost", port=6379, decode_responses=True)
+            self.recon_module = ReconModule(self.black_vault, self.swarm, self.swarm.redis)
+            self.ghost_layer = GhostLayer(self.black_vault)
+            self.ghost_layer_daemon = GhostLayerDaemon(self.ghost_layer, self.black_vault)
+self.self_learning_injection = SelfLearningInjection(self.black_vault)
+            self.ghost_hive = GhostHive([GhostLayer(self.black_vault) for _ in range(5)], self.black_vault)
+            self.register_module("recon", )
 
         self._register_builtin_modules()
 
