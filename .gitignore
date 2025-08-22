@@ -1,1 +1,12 @@
 .venv
+.pytest_cache
+.pyc
+__pycache__
+*.pyo
+*.pyd
+*.pdb
+/.pytest_cache
+/.pyc
+/__pycache__/   
+/__pycache__/
+*.egg-info  

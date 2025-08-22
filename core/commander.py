@@ -2,7 +2,7 @@
 import asyncio
 import websockets
 
-async def handler(websocket, path):
+async def handler(websocket):
     print("[📡] Agent connected.")
     async for message in websocket:
         print(f"[💬] Received: {message}")

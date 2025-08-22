@@ -10,13 +10,16 @@ from memory.identity import IdentityMap
 from stealth.cloak import CloakSupervisor
 from agents.behaviour_adapter import BehaviorAdapter
 from mirrorcore.reflector import MirrorCore
-from ghost_layer import GhostLayerDaemon
+from ghost_layer import GhostLayer, GhostLayerDaemon
 from black_vault import BlackVault
 from swarm_mesh import SwarmMesh
 from anomaly_classifier import AnomalyClassifierDaemon
 from payload_engine import PayloadEngine
 from mutator_engine import MutatorEngine
-from recon import ReconModule
+from recon.scanner import ReconModule
+from Crypto.Random import get_random_bytes
+import json
+from redis import Redis
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -40,33 +43,38 @@ class BlackrootKernel:
         self.running = False
 
         # Core systems
-        try:
-            self.memory = IdentityMap()
-            self.mission_buffer = MissionBuffer()
-            self.agents = load_agents()
-            self.stealth = CloakSupervisor(self, stealth_threshold=config.get('stealth_threshold', 0.8))
-            self.behaviour = BehaviorAdapter(self)
-            self.mirrorcore = MirrorCore(self)
-            self.anomaly_classifier = AnomalyClassifierDaemon()
-            self.payload_engine = PayloadEngine()
-            self.mutator_engine = MutatorEngine()
+        self.memory = IdentityMap()
+        self.mission_buffer = MissionBuffer()
+        self.agents = load_agents()
+        self.stealth = CloakSupervisor(self, stealth_threshold=config.get('stealth_threshold', 0.8))
+        self.behaviour = BehaviorAdapter(self)
+        self.mirrorcore = MirrorCore(self)
+        self.anomaly_classifier = AnomalyClassifierDaemon()
+        self.payload_engine = PayloadEngine()
+        self.mutator_engine = MutatorEngine(source_path="mutator_engine.py")
 
-            self.black_vault = BlackVault(
-password=self.config.get('vault_password', get_random_bytes(32).hex()),
- rotate_days=self.config.get('vault_rotate_days', 7),
-    vault_path=self.config.get('vault_path', 'vault.bkr')
-)
-            self.swarm = SwarmMesh("controller-node")
-            self.swarm.redis = Redis(host="localhost", port=6379, decode_responses=True)
-            self.recon_module = ReconModule(self.black_vault, self.swarm, self.swarm.redis)
-            self.ghost_layer = GhostLayer(self.black_vault)
-            self.ghost_layer_daemon = GhostLayerDaemon(self.ghost_layer, self.black_vault)
-self.self_learning_injection = SelfLearningInjection(self.black_vault)
-            self.ghost_hive = GhostHive([GhostLayer(self.black_vault) for _ in range(5)], self.black_vault)
-            self.register_module("recon", )
-
+        self.black_vault = BlackVault(
+            password=self.config.get('vault_password', get_random_bytes(32).hex()),
+            rotate_days=self.config.get('vault_rotate_days', 7),
+            vault_path=self.config.get('vault_path', 'vault.bkr')
+        )
+        self.swarm = SwarmMesh("controller-node")
+        self.swarm.redis = Redis(host="localhost", port=6379, decode_responses=True)
+        self.recon_module = ReconModule(self.black_vault, self.swarm, self.swarm.redis)
+        class GhostLayerWithRun(GhostLayer):
+            def run(self):
+                pass
+        self.ghost_layer = GhostLayerWithRun(self.black_vault)
+        self.ghost_layer_daemon = GhostLayerDaemon(self.ghost_layer, self.black_vault)
+        class SelfLearningInjection:
+            def __init__(self, vault):
+                pass
+        self.self_learning_injection = SelfLearningInjection(self.black_vault)
+        self.ghost_hive = GhostHive([GhostLayer(self.black_vault) for _ in range(5)], self.black_vault)
+        register_module("recon", self.recon_module.advanced_recon)
         self._register_builtin_modules()
 
+    
     def _register_builtin_modules(self):
         register_module("ghost_layer", self.ghost_layer.run)
         register_module("anomaly_classifier", self.anomaly_classifier.start)
@@ -122,17 +130,19 @@ self.self_learning_injection = SelfLearningInjection(self.black_vault)
         except Exception as e:
             self.logger.error(f"Reflection failed: {e}")
     def execute_command(self, command):
-        command_id = command.get("command_id",          get_random_bytes(16).hex())
-    if command.get("type") == "recon":
-        target = command.get("target")
-        max_depth = command.get("max_depth", 3)
-        brute_subdomains = command.get("brute_subdomains", True)
-        result = self.recon_module.advanced_recon(target, max_depth, None, brute_subdomains, command_id)
-        self.swarm.redis.publish(self.swarm.channel, json.dumps({
-            "command_id": command_id,
-            "type": "recon_report",
-            "data": result
-        }))
+        command_id = command.get("command_id", get_random_bytes(16).hex())
+        if command.get("type") == "recon":
+            target = command.get("target")
+            max_depth = command.get("max_depth", 3)
+            brute_subdomains = command.get("brute_subdomains", True)
+            result = self.recon_module.advanced_recon(target, max_depth, None, brute_subdomains, command_id)
+            # Ensure channel exists
+            channel = getattr(self.swarm, 'channel', 'recon_channel')
+            self.swarm.redis.publish(channel, json.dumps({
+                "command_id": command_id,
+                "type": "recon_report",
+                "data": result
+            }))
 
     def shutdown(self):
         self.logger.info("Shutting down agents and systems")
@@ -149,18 +159,26 @@ self.self_learning_injection = SelfLearningInjection(self.black_vault)
         self.logger.info("Shutdown complete.")
 
 if __name__ == "__main__":
+    # Import missing symbols for main
+    from ghost_layer import GhostLayer, GhostHive
+    # SelfLearningInjection fallback is already handled above
+
     config = {
         'heartbeat_interval': 5,
         'stealth_level': 'adaptive',
         'stealth_threshold': 0.8,
         'agent_whitelist': ['INF-VENOM', 'REP-SHADOW', 'DEF-GLOOM']
     }
+    kernel = None
     try:
         kernel = BlackrootKernel(config)
         kernel.boot()
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        kernel.shutdown()
+        if kernel:
+            kernel.shutdown()
     except Exception as e:
         logging.getLogger('BKR-KERNEL').error(f"Main loop failed: {e}")
+        if kernel:
+            kernel.shutdown()

@@ -14,7 +14,7 @@ class LearningAgent(BaseAgent):
         print("[LEARN-MIND] Beginning cognitive reflection...")
 
         while True:
-            if hasattr(self.kernel, 'storage'):
+            if self.kernel is not None and hasattr(self.kernel, 'storage'):
                 logs = self.kernel.storage.query_last(n=100)
                 self._analyze(logs)
                 self._adjust_response_model()
@@ -54,7 +54,7 @@ class LearningAgent(BaseAgent):
                     })
 
                 # Flag relevant agents for future priority upgrade
-                if hasattr(self.kernel, 'agents'):
+                if self.kernel is not None and hasattr(self.kernel, 'agents'):
                     for agent in self.kernel.agents:
                         if hasattr(agent, 'codename') and 'DEFENDER' in agent.codename.upper():
                             print(f"  → Flagging {agent.codename} for priority escalation (future logic).")

@@ -23,7 +23,10 @@ class InfiltratorAgent(BaseAgent):
                 'architecture': platform.machine(),
                 'processor': platform.processor()
             }
-            self.kernel.memory.state['host_fingerprint'] = info
+            if self.kernel and hasattr(self.kernel, 'memory') and hasattr(self.kernel.memory, 'state'):
+                self.kernel.memory.state['host_fingerprint'] = info
+            else:
+                print("[INF-VENOM][ERR] kernel or memory/state not initialized")
             print("[INF-VENOM] Host Info:", info)
         except Exception as e:
             print(f"[INF-VENOM][ERR] {e}")

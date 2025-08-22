@@ -17,6 +17,7 @@ import dnstwist
 from Crypto.Random import get_random_bytes
 from fastapi import FastAPI
 from redis import Redis
+from swarm_mesh import SwarmMesh
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -37,7 +38,7 @@ PROXY_POOL = [
 class ReconModule:
     """Performs advanced web reconnaissance with BlackVault and SwarmMesh integration."""
     
-    def __init__(self, vault, swarm: 'SwarmMesh', redis: Redis, logger: logging.Logger = None):
+    def __init__(self, vault, swarm: 'SwarmMesh', redis: Redis, logger: Optional[logging.Logger] = None):
         """
         Initializes the recon module with BlackVault and SwarmMesh.
         
@@ -225,7 +226,9 @@ class ReconModule:
                                                            headers=self._get_random_headers(), 
                                                            timeout=8, proxies=self._get_random_proxy())
                                 else:
-                                    resp = self.session.get(target_url, params=data, 
+                                    # Ensure keys are str for params
+                                    safe_data = {str(k): v for k, v in data.items() if k is not None}
+                                    resp = self.session.get(target_url, params=safe_data, 
                                                           headers=self._get_random_headers(), 
                                                           timeout=8, proxies=self._get_random_proxy())
                                 inj_results.append({
@@ -389,13 +392,22 @@ class ReconModule:
                 if r.status_code in (403, 503) or elapsed > 10:
                     self.logger.warning(f"WAF anomaly: {url} status={r.status_code} delay={elapsed:.1f}s")
                     backoff = random.uniform(2, 10)
-                if r.headers.get('Retry-After'):
-                    backoff = max(backoff, float(r.headers.get('Retry-After')))
-                    self.logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
-                elif r.headers.get('X-RateLimit-Reset'):
-                    reset_time = float(r.headers.get('X-RateLimit-Reset'))
-                    backoff = max(backoff, max(0, reset_time - time.time()))
-                    self.logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
+                retry_after = r.headers.get('Retry-After')
+                if retry_after is not None:
+                    try:
+                        backoff = max(backoff, float(retry_after))
+                        self.logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
+                    except Exception:
+                        pass
+                else:
+                    xrlr = r.headers.get('X-RateLimit-Reset')
+                    if xrlr is not None:
+                        try:
+                            reset_time = float(xrlr)
+                            backoff = max(backoff, max(0, reset_time - time.time()))
+                            self.logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
+                        except Exception:
+                            pass
                 if backoff > 0:
                     time.sleep(backoff + random.uniform(0.5, 2.5))
                 
@@ -404,7 +416,7 @@ class ReconModule:
                 endpoints.add(url)
                 emails.update(self.extract_emails(html))
                 secrets.update(self.extract_secrets(html))
-                tech.update(self.fingerprint_tech(r.headers, html))
+                tech.update(self.fingerprint_tech(dict(r.headers), html))
                 
                 if url.endswith("robots.txt"):
                     for p in self.parse_robots(html, url):

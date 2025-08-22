@@ -23,8 +23,19 @@ except ImportError:
 try:
     from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
     _zeroconf = Zeroconf()
+    _ServiceListenerBase = ServiceListener
 except ImportError:
+    class ServiceListener:
+        def add_service(self, zc, type_, name):
+            pass
+        def remove_service(self, zc, type_, name):
+            pass
+        def update_service(self, zc, type_, name):
+            pass
+    ServiceBrowser = None
+    Zeroconf = None
     _zeroconf = None
+    _ServiceListenerBase = ServiceListener
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -324,17 +335,15 @@ class PeerLinkerAgent(BaseAgent):
                 }
                 
                 # Add kernel data if available
-                if hasattr(self.kernel, 'mirrorcore'):
+                if self.kernel is not None and hasattr(self.kernel, 'mirrorcore') and self.kernel.mirrorcore is not None:
                     payload.update({
                         "beliefs": getattr(self.kernel.mirrorcore, 'beliefs', {}),
                         "emotions": getattr(self.kernel.mirrorcore, 'emotions', {}),
                         "missions": getattr(self.kernel.mirrorcore, 'mission_queue', [])
                     })
-                
-                if hasattr(self.kernel, 'memory'):
+                if self.kernel is not None and hasattr(self.kernel, 'memory') and self.kernel.memory is not None:
                     payload["memory"] = self.kernel.memory.recall()
-                
-                if hasattr(self.kernel, 'agents'):
+                if self.kernel is not None and hasattr(self.kernel, 'agents') and self.kernel.agents is not None:
                     payload["agent_status"] = {
                         k: str(v.status) for k, v in self.kernel.agents.items()
                     }
@@ -360,14 +369,21 @@ class PeerLinkerAgent(BaseAgent):
     def _discovery_loop(self):
         """Peer discovery using mDNS and DHT"""
         # Start mDNS listener if available
-        if _zeroconf:
-            try:
-                listener = _MDNSListener(self)
-                ServiceBrowser(_zeroconf, "_peerlinker._tcp.local.", listener)
-                logger.info("mDNS discovery started")
-            except Exception as e:
-                logger.warning(f"mDNS setup failed: {e}")
-        
+        # Only enable mDNS peer discovery if zeroconf and ServiceListener are imported from zeroconf
+        if _zeroconf and ServiceBrowser and _ServiceListenerBase.__module__ == 'zeroconf._services':
+            listener = _MDNSListener(self)
+            # Ensure listener is an instance of the actual ServiceListener
+            if isinstance(listener, _ServiceListenerBase):
+                try:
+                    ServiceBrowser(_zeroconf, "_peerlinker._tcp.local.", listener)
+                    logger.info("mDNS discovery started")
+                except Exception as e:
+                    logger.warning(f"ServiceBrowser instantiation failed: {e}")
+            else:
+                logger.info("mDNS peer discovery is disabled (listener type mismatch)")
+        else:
+            logger.info("mDNS peer discovery is disabled (zeroconf or ServiceListener not available)")
+
         while self.running:
             try:
                 # Random DHT lookup for peer discovery
@@ -466,7 +482,9 @@ class PeerLinkerAgent(BaseAgent):
 
             # Verify signature
             try:
-                b.crypto_sign_verify_detached(their_sig, their_ephemeral, peer_id)
+                from nacl.signing import VerifyKey
+                verify_key = VerifyKey(peer_id)
+                verify_key.verify(their_ephemeral, their_sig)
             except Exception:
                 sock.send(b"BADSIG")
                 return
@@ -493,7 +511,9 @@ class PeerLinkerAgent(BaseAgent):
             self.kbuckets.insert(peer_id, (data["ip"], data["port"]))
 
             # Send handshake response
-            sig = b.crypto_sign_detached(self.ephemeral_pk, self.id_sk)
+            from nacl.signing import SigningKey
+            signing_key = SigningKey(self.id_sk)
+            sig = signing_key.sign(self.ephemeral_pk).signature
             reply = json.dumps({
                 "type": "handshake_2",
                 "ephemeral_pk": self.ephemeral_pk.hex(),
@@ -561,8 +581,10 @@ class PeerLinkerAgent(BaseAgent):
         new_sk, new_pk = b.crypto_kx_keypair()
         
         # Sign new public key
-        sig = b.crypto_sign_detached(new_pk, self.id_sk)
-        
+        from nacl.signing import SigningKey
+        signing_key = SigningKey(self.id_sk)
+        sig = signing_key.sign(new_pk).signature
+
         # Send key rotation request
         rotation_msg = json.dumps({
             "type": "key_rotation",
@@ -595,7 +617,7 @@ class PeerLinkerAgent(BaseAgent):
                         self.session_keys[peer_node_id]["last"] = datetime.utcnow()
             
             # Handle different types of peer data
-            if hasattr(self.kernel, 'mirrorcore'):
+            if self.kernel is not None and hasattr(self.kernel, 'mirrorcore') and self.kernel.mirrorcore is not None:
                 if 'beliefs' in data:
                     self.kernel.mirrorcore.inject_beliefs(data['beliefs'])
                 if 'emotions' in data:
@@ -603,7 +625,12 @@ class PeerLinkerAgent(BaseAgent):
                 if 'missions' in data:
                     self.kernel.mirrorcore.import_peer_missions(data['missions'])
             
-            if 'memory' in data and hasattr(self.kernel, 'memory'):
+            if (
+                'memory' in data and 
+                hasattr(self.kernel, 'memory') and 
+                self.kernel is not None and 
+                getattr(self.kernel, 'memory', None) is not None
+            ):
                 self.kernel.memory.import_peer_memory(data['memory'], source=peer_source)
             
             # Handle key rotation requests
@@ -776,21 +803,21 @@ class KBucketTable:
 # ------------------------------------------------------------------
 #  mDNS listener
 # ------------------------------------------------------------------
-class _MDNSListener(ServiceListener):
+class _MDNSListener(_ServiceListenerBase):
     """Zeroconf/mDNS service listener for local peer discovery"""
     
     def __init__(self, agent):
         self.agent = agent
 
-    def add_service(self, zc: Zeroconf, type_, name):
+    def add_service(self, zc, type_, name):
         """Handle discovered mDNS service"""
         try:
             info = zc.get_service_info(type_, name)
             if info and info.addresses:
                 addr = (socket.inet_ntoa(info.addresses[0]), info.port)
-                
                 # Extract node ID from service properties
-                node_id_hex = info.properties.get(b"id", b"").decode()
+                node_id_bytes = info.properties.get(b"id", b"")
+                node_id_hex = node_id_bytes.decode() if node_id_bytes else ""
                 if node_id_hex:
                     node_id = bytes.fromhex(node_id_hex)
                     self.agent.kbuckets.insert(node_id, addr)
@@ -798,11 +825,11 @@ class _MDNSListener(ServiceListener):
         except Exception as e:
             logger.warning(f"mDNS service processing error: {e}")
 
-    def remove_service(self, zc: Zeroconf, type_, name):
+    def remove_service(self, zc, type_, name):
         """Handle removed mDNS service"""
         pass
 
-    def update_service(self, zc: Zeroconf, type_, name):
+    def update_service(self, zc, type_, name):
         """Handle updated mDNS service"""
         # Treat updates as new services
         self.add_service(zc, type_, name)
@@ -839,10 +866,10 @@ class NetworkStats:
         with self.lock:
             uptime = time.time() - self.start_time
             stats_copy = self.stats.copy()
-            stats_copy['uptime_seconds'] = uptime
-            stats_copy['messages_per_second'] = (
-                stats_copy['messages_sent'] + stats_copy['messages_received']
-            ) / max(uptime, 1)
+            stats_copy['uptime_seconds'] = int(uptime)
+            stats_copy['messages_per_second'] = int(
+                (stats_copy['messages_sent'] + stats_copy['messages_received']) / max(uptime, 1)
+            )
             return stats_copy
 
 
@@ -980,13 +1007,15 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
         sent_count = 0
         
         while queue and sent_count < 10:  # Limit burst sending
+            message = None
             try:
                 message = queue.pop(0)
                 self._send_encrypted(peer_id, message)
                 sent_count += 1
             except Exception as e:
                 # Put message back and stop
-                queue.insert(0, message)
+                if message is not None:
+                    queue.insert(0, message)
                 break
         
         if sent_count > 0:
@@ -1181,7 +1210,7 @@ if __name__ == "__main__":
     # Create agent
     agent = create_peer_linker_agent(enhanced=args.enhanced)
     
-        if args.port != 5555:
+    if args.port != 5555:
         agent.LISTEN_PORT = args.port
 
     # Graceful shutdown on SIGINT / Ctrl-C

@@ -14,7 +14,12 @@ class MissionAgent(BaseAgent):
                 time.sleep(3)
                 continue
 
-            if self.kernel.mission_buffer.tasks:
+            if (
+                self.kernel is not None and
+                hasattr(self.kernel, 'mission_buffer') and
+                hasattr(self.kernel.mission_buffer, 'tasks') and
+                self.kernel.mission_buffer.tasks
+            ):
                 mission = self.kernel.mission_buffer.tasks.pop(0)
                 self.execute_mission(mission)
             else:

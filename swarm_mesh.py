@@ -4,11 +4,62 @@ import random
 import hashlib
 import threading
 import socket
-from typing import Dict, List, Callable, Optional, Any, Tuple
+from typing import Dict, List, Callable, Optional, Any, Tuple, Set
 from dataclasses import dataclass, asdict
 from enum import Enum
+from redis import Redis
+# Define missing CommandType enum
+class CommandType(Enum):
+    EXECUTE = "execute"
+    QUERY = "query"
+    UPDATE = "update"
+    DELETE = "delete"
+    # Add more as needed
+
+# Define missing MetricsCollector stub if not present
+class MetricsCollector:
+    def __init__(self, mesh_node):
+        self.mesh_node = mesh_node
+        self.collection_interval = 10
+    def collect_metrics(self):
+        pass
+
+
+# NetworkMessage dataclass (must be after MessageType and datetime are defined)
+from dataclasses import dataclass
+
+@dataclass
+class NetworkMessage:
+    message_id: str
+    message_type: 'MessageType'
+    sender: str
+    recipient: str
+    payload: dict
+    timestamp: 'datetime'
+
+    def to_dict(self) -> dict:
+        return {
+            'message_id': self.message_id,
+            'message_type': self.message_type.value,
+            'sender': self.sender,
+            'recipient': self.recipient,
+            'payload': self.payload,
+            'timestamp': self.timestamp.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'NetworkMessage':
+        return cls(
+            message_id=data['message_id'],
+            message_type=MessageType(data['message_type']),
+            sender=data['sender'],
+            recipient=data['recipient'],
+            payload=data['payload'],
+            timestamp=datetime.fromisoformat(data['timestamp'])
+        )
 import logging
 from datetime import datetime, timedelta
+from secure_channel import SecureChannel
 
 # Configure logging
 logging.basicConfig(
@@ -17,46 +68,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Define a SecureChannelBase for type consistency
+class SecureChannelBase:
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+
+    def pull_messages(self) -> List[Dict]:
+        raise NotImplementedError
+
+    def send_message(self, target: str, message: Dict) -> bool:
+        raise NotImplementedError
+
+    def add_incoming_message(self, message: Dict):
+        raise NotImplementedError
+
 # Import secure channel module (assumed to exist)
 try:
-    from secure_channel import SecureChannel
+    from secure_channel import SecureChannel as ImportedSecureChannel
+
 except ImportError:
     logger.warning("SecureChannel module not found. Using enhanced mock implementation.")
-    
-    class SecureChannel:
+
+    class SecureChannel(SecureChannelBase):
         """Enhanced mock implementation of SecureChannel with encryption simulation"""
         def __init__(self, node_id: str):
-            self.node_id = node_id
+            super().__init__(node_id)
             self.message_queue = []
             self.encryption_key = hashlib.sha256(node_id.encode()).hexdigest()[:32]
             self.message_counter = 0
-            
+
         def pull_messages(self) -> List[Dict]:
             messages = self.message_queue[:]
             self.message_queue = []
             return messages
-            
+
         def send_message(self, target: str, message: Dict) -> bool:
             try:
                 # Simulate message encryption/signing
                 encrypted_msg = self._encrypt_message(message)
                 logger.debug(f"Encrypted message to {target}: {len(str(encrypted_msg))} bytes")
-                
+
                 # In real implementation, this would send over network
                 # For mock, we'll simulate delivery with some probability
                 delivery_success = random.random() > 0.05  # 95% delivery rate
-                
+
                 if delivery_success:
                     self.message_counter += 1
                     return True
                 else:
                     logger.warning(f"Simulated message delivery failure to {target}")
                     return False
-                    
+
             except Exception as e:
                 logger.error(f"Failed to send message to {target}: {e}")
                 return False
-        
+
         def _encrypt_message(self, message: Dict) -> str:
             """Simulate message encryption"""
             msg_str = json.dumps(message, sort_keys=True)
@@ -66,7 +132,7 @@ except ImportError:
                 (self.encryption_key + msg_str).encode()
             ).decode()
             return encrypted
-        
+
         def add_incoming_message(self, message: Dict):
             """Add an incoming message to the queue (for testing)"""
             self.message_queue.append(message)
@@ -534,7 +600,8 @@ class SwarmMesh:
         self.listen_port = listen_port
         self.discovery_port = discovery_port
         self.max_peers = max_peers
-        
+        self.redis = Redis(host="localhost", port=6379, decode_responses=True)
+
         # Network state
         self.status = NodeStatus.DISCONNECTED
         self.peers: Dict[str, PeerInfo] = {}
@@ -549,7 +616,7 @@ class SwarmMesh:
         # Security and communication
         self.secure_channel = SecureChannel(self.node_id)
         self.auth_tokens: Dict[str, str] = {}  # peer_id -> token
-        
+        self.channel = 'blackroot_swarm'  # For compatibility with existing code
         # Threading and lifecycle
         self.running = False
         self.threads: List[threading.Thread] = []
@@ -822,7 +889,7 @@ class SwarmMesh:
                 self.consistency_manager.sync_with_peers()
                 time.sleep(120)  # Sync every 2 minutes
             except Exception as e:
-                logger.error(f"Consistency sync loop error: {e}")Consistency sync loop error: {e}")
+                logger.error(f"Consistency sync loop error: {e}")
 
     def _cleanup_dead_peers(self):
         """Remove peers that haven't been seen recently"""

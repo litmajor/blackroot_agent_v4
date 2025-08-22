@@ -29,12 +29,13 @@ class SensorAgent(BaseAgent):
             sensors["anomaly_score"] = anomaly_score
             sensors["anomaly_class"] = anomaly_class
 
-            self.kernel.memory.update_sensors(sensors)
+            if hasattr(self, 'kernel') and self.kernel is not None and hasattr(self.kernel, 'memory') and self.kernel.memory is not None:
+                self.kernel.memory.update_sensors(sensors)
 
             # Feed sensor-based beliefs to MirrorCore (if available)
             mirrorcore = getattr(self.kernel, 'mirrorcore', None)
-            if mirrorcore:
-                beliefs = {"anomaly_score": anomaly_score}
+            if mirrorcore is not None:
+                beliefs: dict[str, object] = {"anomaly_score": anomaly_score}
                 emotions = []
                 missions = []
                 cpu = sensors["cpu_percent"]
@@ -52,12 +53,12 @@ class SensorAgent(BaseAgent):
                         missions.append({"task": "contain_intrusion"})
 
                 if cpu > 85 or ram > 90:
-                    beliefs["operational_load"] = "high"
+                    beliefs["operational_load"] = "high"  # Accept string value
                     emotions.append("overwhelmed")
                     missions.append({"task": "monitor_changes"})
 
                 if disk > 90:
-                    beliefs["resource_alert"] = "disk"
+                    beliefs["resource_alert"] = "disk"  # Accept string value
                     emotions.append("stressed")
 
                 if any(p > 1024 for p in ports):
@@ -71,7 +72,7 @@ class SensorAgent(BaseAgent):
                     mirrorcore.dispatch_mission(mission)
 
                 # Log emotions and mission triggers to storage
-                if hasattr(self.kernel, 'storage'):
+                if hasattr(self, 'kernel') and self.kernel is not None and hasattr(self.kernel, 'storage') and self.kernel.storage is not None:
                     self.kernel.storage.persist({
                         "timestamp": datetime.now().isoformat(),
                         "source": self.codename,
@@ -87,8 +88,11 @@ class SensorAgent(BaseAgent):
 
     def _get_open_ports(self):
         connections = psutil.net_connections(kind='inet')
-        ports = list(set(conn.laddr.port for conn in connections if conn.status == 'LISTEN'))
-        return sorted(ports)
+        ports = []
+        for conn in connections:
+            if conn.status == 'LISTEN' and hasattr(conn, 'laddr') and isinstance(conn.laddr, tuple) and len(conn.laddr) > 1:
+                ports.append(conn.laddr[1])
+        return sorted(set(ports))
 
     def _get_top_processes(self, count=5):
         procs = [(p.pid, p.name(), p.cpu_percent(interval=0.1)) for p in psutil.process_iter(['name'])]

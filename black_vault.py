@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import json
 import hashlib
 import hmac
@@ -10,6 +11,25 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad, unpad
 
+# --- Swarm, Identity, Capabilities stubs for integration ---
+class Swarm:
+    @staticmethod
+    def broadcast_capabilities(replica_id, capabilities):
+        print(f"[Stub] Swarm.broadcast_capabilities({replica_id}, {capabilities})")
+    class evolution:
+        @staticmethod
+        def update_composition(module, keys):
+            print(f"[Stub] Swarm.evolution.update_composition({module}, {keys})")
+
+class Identity:
+    replica_id = "standalone-replica"
+
+capabilities = ['mesh_networking', 'command_execution', 'anomaly_classifier']
+
+# For compatibility with 'from black_vault import swarm, identity, capabilities'
+swarm = Swarm
+identity = Identity
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
 
@@ -20,7 +40,7 @@ AES_BLOCK_SIZE = 16
 class BlackVault:
     """A secure, encrypted, and authenticated local storage system for artifacts."""
     
-    def __init__(self, password: str = None, rotate_days: int = 7, vault_path: str = None):
+    def __init__(self, password: Optional[str] = None, rotate_days: int = 7, vault_path: Optional[str] = None):
         """
         Initializes the vault with secure key derivation and directory setup.
         
@@ -62,7 +82,7 @@ class BlackVault:
         hashed = hashlib.sha256(name.encode()).hexdigest()
         return os.path.join(self.vault_dir, f"{hashed}.dat")
 
-    def _encrypt(self, data: bytes, expire_minutes: int = None) -> bytes:
+    def _encrypt(self, data: bytes, expire_minutes: Optional[int] = None) -> bytes:
         """
         Encrypts data with AES-256-CBC and signs with HMAC-SHA256.
         
@@ -114,7 +134,7 @@ class BlackVault:
             self.logger.error(f"Decryption failed: {e}")
             raise
 
-    def store(self, name: str, data: bytes, expire_minutes: int = None):
+    def store(self, name: str, data: bytes, expire_minutes: Optional[int] = None):
         """
         Encrypts and stores an artifact in the vault.
         

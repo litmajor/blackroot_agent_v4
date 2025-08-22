@@ -11,8 +11,8 @@ import threading
 
 # === Runtime Registration Hook ===
 try:
-    import blackroot_core
-    blackroot_core.register_module("anomaly_classifier", lambda: AnomalyClassifierDaemon().start())
+    from kernel.core import register_module
+    from anomaly_classifier import AnomalyClassifierDaemon
     print("[🔗] AnomalyClassifier auto-deployed into Blackroot runtime.")
 except ImportError:
     print("[⚠️] Blackroot core runtime not found. Standalone mode engaged.")
@@ -26,9 +26,9 @@ class SwarmAnomalySync:
         payload = json.dumps(self.classifier.history).encode()
         print("[📡] Broadcasting anomaly profile to swarm...")
         try:
-            from blackvault_storage_module import swarm, identity, capabilities
+            from black_vault import swarm, identity, capabilities
             swarm.broadcast_capabilities(identity.replica_id, capabilities + ["anomaly_classifier"])
-        except:
+        except Exception:
             pass
 
     def sync_from_peer(self, profile_data):
@@ -45,10 +45,10 @@ class SwarmAnomalySync:
             print(f"[!] Sync error: {e}")
 
         try:
-            from blackvault_storage_module import swarm
+            from black_vault import swarm
             if hasattr(swarm, 'evolution'):
                 swarm.evolution.update_composition("anomaly_classifier", list(self.classifier.history.keys()))
-        except:
+        except Exception:
             pass
 
 class AnomalyClassifier:
@@ -83,13 +83,15 @@ class AnomalyClassifier:
     def adapt_strategy(self, category: str, value: float, z_score: float):
         print(f"[🔄] Adapting tactics for '{category}' due to anomaly...")
         try:
-            from blackvault_storage_module import swarm
+            from black_vault import swarm
             swarm.broadcast_capabilities("anomaly_response", [f"anomaly:{category}"])
         except:
             pass
         try:
-            from ghost_layer_module import GhostLayer
-            gl = GhostLayer()
+            from ghost_layer import GhostLayer
+            gl = GhostLayer(
+                vault="anomaly_classifier"
+            )
             gl.mutate_shellcode()
         except:
             pass

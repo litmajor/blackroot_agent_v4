@@ -1,9 +1,13 @@
 import datetime
 import random
 from mirrorcore.storage import MirrorStorage
+from typing import Dict, Optional
 
 
 class MirrorCore:
+    def dispatch_mission(self, mission):
+        print(f"[MIRRORCORE] Dispatching mission: {mission}")
+        # You can implement actual mission dispatch logic here if needed
     def __init__(self, kernel):
         self.kernel = kernel
         self.model = {}
@@ -107,29 +111,44 @@ class MirrorCore:
 
 
 
-def inject_beliefs(self, beliefs: Dict):
-    print(f"[MIRRORCORE] Injecting beliefs: {beliefs}")
-    self.beliefs.update(beliefs)
+    def inject_beliefs(self, beliefs: Optional[Dict] = None):
+        if beliefs is None:
+            beliefs = self.beliefs
+        if beliefs is None:
+            beliefs = {}
+        print(f"[MIRRORCORE] Injecting beliefs: {beliefs}")
+        self.beliefs.update(beliefs)
 
-    for key, value in beliefs.items():
-        if key.startswith("learned_pattern::"):
-            atype = key.split("::")[1]
-            count = int(value.replace("_hits", ""))
+        for key, value in beliefs.items():
+            if key.startswith("learned_pattern::"):
+                atype = key.split("::")[1]
+                count = int(value.replace("_hits", ""))
 
-            print(f"[MIRRORCORE] Storing learned pattern: {atype} ({count} hits)")
-            self.memory[f"pattern::{atype}"] = {
-                "frequency": count,
-                "confidence": "high" if count >= 10 else "medium",
-                "last_seen": datetime.now().isoformat()
-            }
+                print(f"[MIRRORCORE] Storing learned pattern: {atype} ({count} hits)")
+                if not hasattr(self, 'memory'):
+                    self.memory = {}
+                self.memory[f"pattern::{atype}"] = {
+                    "frequency": count,
+                    "confidence": "high" if count >= 10 else "medium",
+                    "last_seen": datetime.datetime.now().isoformat()
+                }
 
-            self.inject_emotions(["vigilant"])
-            self.dispatch_mission({
-                "task": f"preempt::{atype}",
-                "reason": "learned_pattern",
-                "confidence": "learned"
-            })
+                if hasattr(self, 'inject_emotions') and callable(getattr(self, 'inject_emotions', None)):
+                    self.inject_emotions(["vigilant"])
+                if hasattr(self, 'dispatch_mission') and callable(getattr(self, 'dispatch_mission', None)):
+                    self.dispatch_mission({
+                        "task": f"preempt::{atype}",
+                        "reason": "learned_pattern",
+                        "confidence": "learned"
+                    })
 
-    # ✅ Insert this right after the learned pattern block
-    if hasattr(self.kernel, 'behavior'):
-        self.kernel.behavior.adapt_based_on_beliefs(beliefs)
+            # ✅ Insert this right after the learned pattern block
+            if hasattr(self.kernel, 'behavior'):
+                self.kernel.behavior.adapt_based_on_beliefs(beliefs)
+    
+    def inject_emotions(self, emotions):
+        print(f"[MIRRORCORE] Injecting emotions: {emotions}")
+        if isinstance(emotions, list):
+            self.emotions['injected'] = emotions
+        else:
+            self.emotions['injected'] = [emotions]

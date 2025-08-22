@@ -9,6 +9,7 @@ import zlib
 from datetime import datetime
 import re
 import os # Added for file operations in example
+from typing import Optional
 
 # --- AdvancedIdentifierRenamer (AST-based) ---
 class AdvancedIdentifierRenamer(ast.NodeTransformer):
@@ -139,8 +140,21 @@ class AdvancedIdentifierRenamer(ast.NodeTransformer):
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
         """Visits async function definitions (same logic as regular functions)."""
-        # Call the same logic as visit_FunctionDef
-        return self.visit_FunctionDef(node)
+        original_name = node.name
+
+        # Rename the async function itself
+        node.name = self._get_new_name(original_name)
+
+        # Rename arguments within the async function's new scope
+        for arg in node.args.args:
+            arg.arg = self._get_new_name(arg.arg)
+        if node.args.vararg:  # *args
+            node.args.vararg.arg = self._get_new_name(node.args.vararg.arg)
+        if node.args.kwarg:  # **kwargs
+            node.args.kwarg.arg = self._get_new_name(node.args.kwarg.arg)
+
+        # The overridden visit method will call generic_visit for the body
+        return node
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
         """Visits class definitions."""
@@ -175,6 +189,21 @@ class AdvancedIdentifierRenamer(ast.NodeTransformer):
 
 # --- MutatorEngine ---
 class MutatorEngine:
+    def evolve_composition(self, output_path: Optional[str] = None):
+        """
+        Applies advanced polymorphic transformations to the source code and writes to output_path if provided.
+        Returns the mutated code as a string.
+        """
+        with open(self.source_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+        mutated = self._polymorphic_transform(code)
+        # Optionally, apply further randomization or mutation here
+        mutated += f"\n# Evolved at {datetime.utcnow().isoformat()}\n"
+        if output_path:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(mutated)
+            print(f"[🧬] Evolved composition saved to {output_path}")
+        return mutated
     """A class to create mutated, polymorphic copies of a source file."""
     def __init__(self, source_path: str, obfuscation_chance: float = 0.3):
         self.source_path = source_path
@@ -234,9 +263,11 @@ class MutatorEngine:
                 # Determine indentation from the line at insert_idx or the previous one
                 indent = ""
                 if insert_idx < len(lines):
-                    indent = re.match(r"^\s*", lines[insert_idx]).group(0)
+                    match = re.match(r"^\s*", lines[insert_idx])
+                    indent = match.group(0) if match else ""
                 elif insert_idx > 0:
-                    indent = re.match(r"^\s*", lines[insert_idx - 1]).group(0)
+                    match = re.match(r"^\s*", lines[insert_idx - 1])
+                    indent = match.group(0) if match else ""
 
 
                 dummy_choice = random.choice(dummy_functions)
