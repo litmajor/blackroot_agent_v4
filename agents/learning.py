@@ -1,63 +1,92 @@
-import time
-from datetime import datetime
+import time, logging, json, uuid
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 from agents.base import BaseAgent
 
-class LearningAgent(BaseAgent):
-    def __init__(self):
-        super().__init__('LEARN-MIND')
-        self.anomaly_stats = {}
-        self.analysis_interval = 60  # seconds
-        self.threshold = 5  # minimum frequency for response adaptation
+log = logging.getLogger("LEARN-MIND")
 
+
+class LearningAgent(BaseAgent):
+    def __init__(self, cfg: Optional[Dict] = None):
+        super().__init__("LEARN-MIND")
+        cfg = cfg or {}
+        self.window_minutes = cfg.get("window_minutes", 60)
+        self.threshold = cfg.get("threshold", 5)
+        self.interval = cfg.get("interval", 60)
+        self.stats: Dict[str, int] = {}
+        self.last_log = datetime.utcnow()
+
+    # ------------------------------------------------------------------
     def run(self):
         super().run()
-        print("[LEARN-MIND] Beginning cognitive reflection...")
-
+        log.info("Learning loop started (window %s min, threshold %s)", self.window_minutes, self.threshold)
         while True:
-            if self.kernel is not None and hasattr(self.kernel, 'storage'):
-                logs = self.kernel.storage.query_last(n=100)
+            logs = self._fetch_logs()
+            if logs:
                 self._analyze(logs)
-                self._adjust_response_model()
-            time.sleep(self.analysis_interval)
+                self._adapt()
+            time.sleep(self.interval)
 
-    def _analyze(self, logs):
+    # ------------------------------------------------------------------
+    def _fetch_logs(self) -> List[Dict]:
+        storage = getattr(getattr(self, "kernel", None), "storage", None)
+        if storage is None:
+            return []
+        try:
+            return storage.query_last(n=100)  # adjust as needed
+        except Exception as e:
+            log.warning("Storage query error: %s", e)
+            return []
+
+    # ------------------------------------------------------------------
+    def _analyze(self, logs: List[Dict]) -> None:
+        cutoff = datetime.utcnow() - timedelta(minutes=self.window_minutes)
+        self.stats.clear()
         for entry in logs:
-            if not entry:
+            ts = entry.get("timestamp")
+            if ts and datetime.fromisoformat(ts) < cutoff:
                 continue
-            anomaly_class = entry.get("anomaly_class", {})
-            anomaly_type = anomaly_class.get("type")
-            if anomaly_type:
-                self.anomaly_stats[anomaly_type] = self.anomaly_stats.get(anomaly_type, 0) + 1
+            atype = entry.get("anomaly_class", {}).get("type")
+            if atype:
+                self.stats[atype] = self.stats.get(atype, 0) + 1
 
-    def _adjust_response_model(self):
-        print("[LEARN-MIND] Adapting based on observed trends:")
-        for atype, count in self.anomaly_stats.items():
-            if count >= self.threshold:
-                print(f"  → Anomaly '{atype}' occurred {count} times. Suggesting strategic boost.")
+    # ------------------------------------------------------------------
+    def _adapt(self) -> None:
+        for atype, count in self.stats.items():
+            if count < self.threshold:
+                continue
 
-                # MirrorCore belief injection and memory
-                mirrorcore = getattr(self.kernel, 'mirrorcore', None)
-                if mirrorcore:
-                    # Belief injection
-                    mirrorcore.inject_beliefs({
-                        f"learned_pattern::{atype}": f"{count}_hits"
-                    })
+            log.debug("Learned pattern '%s' (%s hits)", atype, count)
+            self._inject_learnings(atype, count)
 
-                    # Emotional state shift
-                    mirrorcore.inject_emotions(["vigilant"])
+        self._maybe_log()
 
-                    # Mission suggestion
-                    mirrorcore.dispatch_mission({
-                        "task": f"preempt::{atype}",
-                        "reason": "learned_pattern",
-                        "confidence": "learned"
-                    })
+    # ------------------------------------------------------------------
+    def _inject_learnings(self, atype: str, count: int):
+        # 1. MirrorCore beliefs / emotions / missions
+        mc = getattr(self.kernel, "mirrorcore", None)
+        if mc is not None:
+            mc.inject_beliefs({f"learned::{atype}": count})
+            mc.inject_emotions(["vigilant"])
+            mc.dispatch_mission({"task": f"preempt_{atype}", "reason": "learned", "confidence": "high"})
 
-                # Flag relevant agents for future priority upgrade
-                if self.kernel is not None and hasattr(self.kernel, 'agents'):
-                    for agent in self.kernel.agents:
-                        if hasattr(agent, 'codename') and 'DEFENDER' in agent.codename.upper():
-                            print(f"  → Flagging {agent.codename} for priority escalation (future logic).")
+        # 2. SwarmMesh telemetry
+        redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
+        if redis:
+            redis.publish(
+                "learned_anomalies",
+                json.dumps({"atype": atype, "count": count, "ts": datetime.utcnow().isoformat()}, separators=(",", ":")),
+            )
 
-        # Clear stats after learning cycle
-        self.anomaly_stats.clear()
+        # 3. Flag defender agents (placeholder)
+        agents = getattr(self.kernel, "agents", [])
+        for agent in agents:
+            if "defender" in str(getattr(agent, "codename", "")).lower():
+                log.debug("Flagged %s for escalation", agent.codename)
+
+    # ------------------------------------------------------------------
+    def _maybe_log(self):
+        now = datetime.utcnow()
+        if (now - self.last_log).total_seconds() >= 300:  # 5 min
+            log.info("Current patterns: %s", self.stats)
+            self.last_log = now

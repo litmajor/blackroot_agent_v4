@@ -1,109 +1,114 @@
-import time
+import time, logging, json, uuid, random
+from datetime import datetime, timedelta
 from agents.base import BaseAgent
-from datetime import datetime
+
+log = logging.getLogger("REFLECT-DELTA")
+
 
 class ReflectionAgent(BaseAgent):
-    def __init__(self):
-        super().__init__('REFLECT-DELTA')
-        self.interval = 60  # seconds
-        self.running = True  # Initialize running attribute
+    def __init__(self, cfg: dict | None = None):
+        super().__init__("REFLECT-DELTA")
+        cfg = cfg or {}
+        self.interval = max(1, cfg.get("interval", 60))
+        self.jitter = cfg.get("jitter", 0.1)          # ±10 %
+        self.log_every = cfg.get("log_every", 300)    # seconds
+        self.last_log = datetime.utcnow()
+        self.running = True
 
+    # ------------------------------------------------------------------
     def run(self):
         super().run()
-        print("[REFLECT-DELTA] Reflection cycle started.")
-
+        log.info("Reflection cycle started (interval %ss, jitter %s)", self.interval, self.jitter)
         while self.running:
-            self.peer_scores = self.score_peers()
-            self.conflict_flags = self.detect_conflicts()
-            self.audit_beliefs()
-            self.refine_missions()
-            self.tune_behavior()
+            self._single_cycle()
+            time.sleep(self._jittered_sleep())
 
-            if self.kernel is not None and hasattr(self.kernel, 'storage') and self.kernel.storage is not None:
-                mirrorcore = getattr(self.kernel, 'mirrorcore', None)
-                beliefs = getattr(mirrorcore, "beliefs", {}) if mirrorcore is not None else {}
-                missions = getattr(mirrorcore, "mission_queue", []) if mirrorcore is not None else []
-                self.kernel.storage.persist({
-                    "timestamp": datetime.now().isoformat(),
-                    "source": self.codename,
-                    "cycle": "reflection",
-                    "peer_scores": self.peer_scores,
-                    "beliefs": beliefs,
-                    "missions": missions,
-                    "conflicts_detected": self.conflict_flags,
-                })
+    # ------------------------------------------------------------------
+    def _single_cycle(self):
+        """One atomic reflection loop."""
+        mirrorcore = getattr(self.kernel, "mirrorcore", None)
+        storage = getattr(self.kernel, "storage", None)
+        memory = getattr(self.kernel, "memory", None)
 
-            time.sleep(self.interval)
+        # Data gathering
+        peer_scores = self._score_peers(memory)
+        conflicts = self._detect_conflicts(mirrorcore)
+        self._prune_outdated(mirrorcore)
+        self._refine_missions(mirrorcore)
 
-    def audit_beliefs(self):
-        if not self.kernel or not hasattr(self.kernel, 'mirrorcore') or self.kernel.mirrorcore is None:
-            print("[REFLECT-DELTA] No mirrorcore available for auditing beliefs.")
-            return
+        # Build snapshot
+        snapshot = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "source": self.codename,
+            "peer_scores": peer_scores,
+            "conflicts": conflicts,
+            "beliefs": getattr(mirrorcore, "beliefs", {}) if mirrorcore else {},
+            "missions": getattr(mirrorcore, "mission_queue", []) if mirrorcore else [],
+        }
 
-        beliefs = getattr(self.kernel.mirrorcore, 'beliefs', {})
-        print("[REFLECT-DELTA] Auditing beliefs:", beliefs)
+        # Persist
+        if storage:
+            storage.persist(snapshot)
 
-        outdated = [k for k, v in beliefs.items() if isinstance(v, dict) and v.get('timestamp', 0) < time.time() - 3600]
-        for key in outdated:
-            print(f"[REFLECT-DELTA] Belief '{key}' is outdated — considering removal.")
-            # Optionally prune or revise
+        # SwarmMesh broadcast
+        redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
+        if redis:
+            redis.publish("reflection", json.dumps(snapshot, separators=(",", ":")))
 
-    def refine_missions(self):
-        if not self.kernel or not hasattr(self.kernel, 'mirrorcore') or self.kernel.mirrorcore is None:
-            return
+        self._maybe_log(snapshot)
 
-        missions = getattr(self.kernel.mirrorcore, 'mission_queue', [])
-        active = [m for m in missions if not m.get('completed')]
-        print(f"[REFLECT-DELTA] {len(active)} active missions found.")
-
-        now = time.time()
-        new_queue = []
-        for m in active:
-            if 'timestamp' in m and now - m['timestamp'] > 3600:
-                print(f"[REFLECT-DELTA] Mission stale: {m}")
-                continue
-            new_queue.append(m)
-
-        if hasattr(self.kernel.mirrorcore, 'mission_queue'):
-            self.kernel.mirrorcore.mission_queue = new_queue
-
-    def score_peers(self):
-        if not self.kernel or not hasattr(self.kernel, 'memory') or self.kernel.memory is None:
+    # ------------------------------------------------------------------
+    def _score_peers(self, memory) -> dict[str, int]:
+        if memory is None:
             return {}
+        mem = getattr(memory, "memory", {})
+        scores: dict[str, int] = {}
+        for rec in mem.values():
+            src = rec.get("source")
+            if src:
+                scores[src] = scores.get(src, 0) + 1
+        return scores
 
-        print("[REFLECT-DELTA] Scoring peers based on memory contributions...")
-        peer_scores = {}
-        memory_dict = getattr(self.kernel.memory, 'memory', {})
-        for k, record in memory_dict.items():
-            src = record.get("source")
-            if not src:
-                continue
-            peer_scores[src] = peer_scores.get(src, 0) + 1
+    def _detect_conflicts(self, mirrorcore) -> list[str]:
+        if mirrorcore is None:
+            return []
+        beliefs = getattr(mirrorcore, "beliefs", {})
+        conflicts = []
 
-        for peer, score in peer_scores.items():
-            print(f"[REFLECT-DELTA] Peer '{peer}' score: {score}")
-        return peer_scores
+        cpu = beliefs.get("sensor.cpu_percent", {}).get("value", 0)
+        load = beliefs.get("operational_load")
+        if load == "high" and cpu < 50:
+            beliefs["operational_load"] = "normal"
+            beliefs["last_adjusted_by"] = self.codename
+            beliefs["timestamp"] = time.time()
+            conflicts.append("CPU low but belief high-load")
+        return conflicts
 
-    def detect_conflicts(self):
-        mirrorcore = getattr(self.kernel, 'mirrorcore', None)
-        beliefs = getattr(mirrorcore, 'beliefs', {}) if mirrorcore is not None else {}
-        memory_obj = getattr(self.kernel, 'memory', None)
-        memory = getattr(memory_obj, 'memory', {}) if memory_obj is not None else {}
-        flags = []
+    def _prune_outdated(self, mirrorcore):
+        if mirrorcore is None:
+            return
+        beliefs = getattr(mirrorcore, "beliefs", {})
+        cutoff = time.time() - 3600
+        stale = [k for k, v in beliefs.items() if isinstance(v, dict) and v.get("timestamp", 0) < cutoff]
+        for k in stale:
+            del beliefs[k]
 
-        if 'operational_load' in beliefs and 'sensor.cpu_percent' in memory:
-            cpu = memory['sensor.cpu_percent'].get('value', 0)
-            load = beliefs['operational_load']
-            if load == 'high' and cpu < 50:
-                msg = "Conflict: CPU low but belief is high load."
-                print(f"[REFLECT-DELTA] {msg}")
-                beliefs['operational_load'] = 'normal'
-                beliefs['last_adjusted_by'] = self.codename
-                beliefs['timestamp'] = time.time()
-                flags.append(msg)
+    def _refine_missions(self, mirrorcore):
+        if mirrorcore is None:
+            return
+        queue = getattr(mirrorcore, "mission_queue", [])
+        cutoff = time.time() - 3600
+        fresh = [m for m in queue if not m.get("completed") and m.get("timestamp", 0) > cutoff]
+        mirrorcore.mission_queue = fresh
 
-        return flags
+    # ------------------------------------------------------------------
+    def _jittered_sleep(self) -> float:
+        base = self.interval
+        delta = base * self.jitter
+        return base + random.uniform(-delta, delta)
 
-    def tune_behavior(self):
-        print("[REFLECT-DELTA] Behavioral tuning (placeholder)...")
-        # Future: self-kernel tuning logic
+    def _maybe_log(self, snapshot: dict):
+        now = datetime.utcnow()
+        if (now - self.last_log).total_seconds() >= self.log_every:
+            log.info("Reflection snapshot: %s", snapshot)
+            self.last_log = now

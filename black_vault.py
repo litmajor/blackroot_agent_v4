@@ -300,3 +300,46 @@ class BlackVault:
                 self.logger.info("Vault wiped due to trigger condition")
             except OSError as e:
                 self.logger.error(f"Failed to wipe vault: {e}")
+                
+                
+# ------------------------------------------------------------------
+# main() – quick demo / self-test
+# ------------------------------------------------------------------
+def main():
+    import tempfile, shutil, sys, getpass
+
+    print("=== BlackVault Demo ===")
+    # 1. Create a throw-away vault in %TEMP%
+    tmp_dir = tempfile.mkdtemp(prefix="vault_demo_")
+    password = getpass.getpass("Enter vault password (or press Enter for random): ") or None
+    vault = BlackVault(password=password, rotate_days=1, vault_path=tmp_dir)
+
+    # 2. Store some artifacts
+    vault.store("hello", b"hello world")  # never expires
+    vault.store("payload", open(sys.executable, "rb").read())  # store Python itself
+    vault.store("secret", json.dumps({"key": "value"}).encode())
+
+    # 3. List what we have
+    print("Artifacts on disk:", vault.list_artifacts())
+
+    # 4. Retrieve & verify
+    try:
+        print("hello ->", vault.retrieve("hello").decode())
+    except ValueError as e:
+        print("hello expired:", e)
+    try:
+        print("secret ->", json.loads(vault.retrieve("secret").decode()))
+    except ValueError as e:
+        print("secret expired:", e)
+
+    # 5. Force key rotation (demo)
+    vault._check_key_rotation()
+
+    # 6. Clean expired (none yet) and wipe
+    vault.clean_expired()
+    vault.wipe_all()
+    shutil.rmtree(tmp_dir)
+    print("Demo finished – vault wiped.")
+
+if __name__ == "__main__":
+    main()

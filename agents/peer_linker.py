@@ -23,8 +23,10 @@ except ImportError:
 try:
     from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
     _zeroconf = Zeroconf()
-    _ServiceListenerBase = ServiceListener
 except ImportError:
+    ServiceBrowser = None
+    Zeroconf = None
+    _zeroconf = None
     class ServiceListener:
         def add_service(self, zc, type_, name):
             pass
@@ -32,10 +34,6 @@ except ImportError:
             pass
         def update_service(self, zc, type_, name):
             pass
-    ServiceBrowser = None
-    Zeroconf = None
-    _zeroconf = None
-    _ServiceListenerBase = ServiceListener
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -370,17 +368,45 @@ class PeerLinkerAgent(BaseAgent):
         """Peer discovery using mDNS and DHT"""
         # Start mDNS listener if available
         # Only enable mDNS peer discovery if zeroconf and ServiceListener are imported from zeroconf
-        if _zeroconf and ServiceBrowser and _ServiceListenerBase.__module__ == 'zeroconf._services':
+        # Only enable mDNS if all zeroconf components are real (not None and not fallback)
+        enable_mdns = (
+            _zeroconf is not None and
+            ServiceBrowser is not None and
+            ServiceListener is not None and
+            hasattr(ServiceListener, '__module__') and 'zeroconf' in ServiceListener.__module__
+        )
+        if enable_mdns:
+            class _MDNSListener(ServiceListener):
+                """Zeroconf/mDNS service listener for local peer discovery"""
+                def __init__(self, agent):
+                    self.agent = agent
+                def add_service(self, zc, type_, name):
+                    try:
+                        info = zc.get_service_info(type_, name)
+                        if info and info.addresses:
+                            addr = (socket.inet_ntoa(info.addresses[0]), info.port)
+                            node_id_bytes = info.properties.get(b"id", b"")
+                            node_id_hex = node_id_bytes.decode() if node_id_bytes else ""
+                            if node_id_hex:
+                                node_id = bytes.fromhex(node_id_hex)
+                                self.agent.kbuckets.insert(node_id, addr)
+                                logger.info(f"Discovered peer via mDNS: {addr}")
+                    except Exception as e:
+                        logger.warning(f"mDNS service processing error: {e}")
+                def remove_service(self, zc, type_, name):
+                    pass
+                def update_service(self, zc, type_, name):
+                    self.add_service(zc, type_, name)
             listener = _MDNSListener(self)
-            # Ensure listener is an instance of the actual ServiceListener
-            if isinstance(listener, _ServiceListenerBase):
+            try:
+                # zeroconf >=0.39.0 expects a list of handlers, older versions accept a single handler
                 try:
-                    ServiceBrowser(_zeroconf, "_peerlinker._tcp.local.", listener)
-                    logger.info("mDNS discovery started")
-                except Exception as e:
-                    logger.warning(f"ServiceBrowser instantiation failed: {e}")
-            else:
-                logger.info("mDNS peer discovery is disabled (listener type mismatch)")
+                    ServiceBrowser(_zeroconf, "_peerlinker._tcp.local.", [listener])  # type: ignore
+                except TypeError:
+                    ServiceBrowser(_zeroconf, "_peerlinker._tcp.local.", listener)  # type: ignore
+                logger.info("mDNS discovery started")
+            except Exception as e:
+                logger.warning(f"ServiceBrowser instantiation failed: {e}")
         else:
             logger.info("mDNS peer discovery is disabled (zeroconf or ServiceListener not available)")
 
@@ -803,7 +829,7 @@ class KBucketTable:
 # ------------------------------------------------------------------
 #  mDNS listener
 # ------------------------------------------------------------------
-class _MDNSListener(_ServiceListenerBase):
+class _MDNSListener(ServiceListener):
     """Zeroconf/mDNS service listener for local peer discovery"""
     
     def __init__(self, agent):
@@ -827,6 +853,7 @@ class _MDNSListener(_ServiceListenerBase):
 
     def remove_service(self, zc, type_, name):
         """Handle removed mDNS service"""
+        
         pass
 
     def update_service(self, zc, type_, name):
@@ -884,16 +911,38 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
         self.stats = NetworkStats()
         self.connection_retry_delays = {}  # peer_id -> delay
         self.max_retry_delay = 300  # 5 minutes max retry delay
-        self.message_queue = {}  # peer_id -> [messages] for offline peers
+        self.message_queue = {}  # peer_id -> list of (message, enqueue_time)
         self.max_queue_size = 100
-        
+        self.queue_ttl = 300  # seconds, TTL for queued messages
+
         # Health check parameters
         self.last_successful_sync = time.time()
         self.health_check_interval = 30
         self.unhealthy_threshold = 300  # 5 minutes without successful sync
-        
+
         # Start health monitoring
         threading.Thread(target=self._health_monitor_loop, daemon=True).start()
+        threading.Thread(target=self._queue_cleanup_loop, daemon=True).start()
+
+    def _queue_cleanup_loop(self):
+        """Periodically clean up expired messages from the message queue"""
+        while self.running:
+            try:
+                now = time.time()
+                expired_peers = []
+                for peer_id, queue in list(self.message_queue.items()):
+                    # Remove expired messages
+                    new_queue = [(msg, ts) for (msg, ts) in queue if now - ts < self.queue_ttl]
+                    if new_queue:
+                        self.message_queue[peer_id] = new_queue
+                    else:
+                        expired_peers.append(peer_id)
+                # Remove empty queues
+                for peer_id in expired_peers:
+                    del self.message_queue[peer_id]
+            except Exception as e:
+                logger.error(f"Queue cleanup error: {e}")
+            time.sleep(60)
     
     def _health_monitor_loop(self):
         """Monitor network health and take corrective actions"""
@@ -987,13 +1036,12 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
                     logger.debug(f"Retrying send to {peer_id.hex()[:8]}, attempt {attempt + 2}/{max_retries}")
     
     def _queue_message(self, peer_id, message: bytes):
-        """Queue message for later delivery"""
+        """Queue message for later delivery with TTL"""
         if peer_id not in self.message_queue:
             self.message_queue[peer_id] = []
-        
         queue = self.message_queue[peer_id]
-        queue.append(message)
-        
+        now = time.time()
+        queue.append((message, now))
         # Limit queue size
         if len(queue) > self.max_queue_size:
             queue.pop(0)  # Remove oldest message
@@ -1005,22 +1053,24 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
         
         queue = self.message_queue[peer_id]
         sent_count = 0
-        
-        while queue and sent_count < 10:  # Limit burst sending
-            message = None
+        now = time.time()
+        # Only send messages that are not expired
+        new_queue = []
+        while queue and sent_count < 10:
+            message, ts = queue.pop(0)
+            if now - ts > self.queue_ttl:
+                continue  # Drop expired
             try:
-                message = queue.pop(0)
                 self._send_encrypted(peer_id, message)
                 sent_count += 1
             except Exception as e:
                 # Put message back and stop
-                if message is not None:
-                    queue.insert(0, message)
+                new_queue.insert(0, (message, ts))
                 break
-        
+        # Add any remaining messages back
+        queue[:0] = new_queue
         if sent_count > 0:
             logger.info(f"Sent {sent_count} queued messages to {peer_id.hex()[:8]}")
-        
         # Clean up empty queues
         if not queue:
             del self.message_queue[peer_id]
@@ -1109,6 +1159,43 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
                 except Exception as e:
                     logger.warning(f"Failed to import peer {peer_info}: {e}")
             
+            def _send_encrypted_with_retry(self, peer_id, plaintext: bytes):
+                """Send encrypted message with retry logic and socket cleanup"""
+                max_retries = 3
+                base_delay = 1
+                for attempt in range(max_retries):
+                    try:
+                        self._send_encrypted(peer_id, plaintext)
+                        self.stats.increment('messages_sent')
+                        self.stats.increment('bytes_sent', len(plaintext))
+                        # Reset retry delay on success
+                        self.connection_retry_delays.pop(peer_id, None)
+                        self.last_successful_sync = time.time()
+                        # Send queued messages if any
+                        self._send_queued_messages(peer_id)
+                        return
+                    except Exception as e:
+                        self.stats.increment('connection_errors')
+                        # Clean up any sockets for this peer
+                        try:
+                            for key in list(self.socket_pool.keys()):
+                                if isinstance(key, tuple) and key[1] == peer_id:
+                                    sock = self.socket_pool.pop(key)
+                                    try:
+                                        sock.close()
+                                    except Exception:
+                                        pass
+                        except Exception as se:
+                            logger.debug(f"Socket cleanup error for {peer_id.hex()[:8]}: {se}")
+                        if attempt == max_retries - 1:
+                            # Final attempt failed, queue message
+                            self._queue_message(peer_id, plaintext)
+                            logger.warning(f"Message queued for peer {peer_id.hex()[:8]} after {max_retries} attempts")
+                        else:
+                            # Wait before retry
+                            delay = base_delay * (2 ** attempt)
+                            time.sleep(delay)
+                            logger.debug(f"Retrying send to {peer_id.hex()[:8]}, attempt {attempt + 2}/{max_retries}")
             logger.info(f"Imported {imported} peers from backup")
             return imported
             

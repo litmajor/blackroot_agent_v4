@@ -10,6 +10,15 @@ from Crypto.Util.Padding import pad, unpad
 import queue
 
 class SecureChannel:
+    def send_message(self, target: str, message: Dict) -> bool:
+        """Send a message to a target node (wrapper for push_message)."""
+        # For compatibility with SwarmMesh, target is ignored (uses self.channel)
+        try:
+            self.push_message(message)
+            return True
+        except Exception as e:
+            print(f"[SECURE] Failed to send message to {target}: {e}")
+            return False
     def __init__(self, node_id: str):
         self.node_id = node_id
         self.shared_key = self._derive_key("blackroot_mesh_secret")

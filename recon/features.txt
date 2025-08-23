@@ -1,0 +1,98 @@
+Below is a **feature wish-list** that keeps the existing architecture intact (BlackVault + SwarmMesh + Redis) yet pushes the scanner toward **enterprise-grade** maturity.  Items are grouped by impact and effort so you can roadmap them easily.
+
+---
+
+### 🔍 1. Passive & OSINT Expansion  *(low effort, high signal)*
+| Feature | Quick Win Value |
+|---|---|
+| **Shodan / Censys / Fofa API** | Grab open ports, banners, vulns without touching target. |
+| **Wayback & CommonCrawl** | Historical URLs for crawling without brute-force. |
+| **GitHub dorking** | Leak secrets in public repos (`"target.com" + "password"`). |
+| **CSP / DNS records parser** | Exfil allowed domains + subdomain take-over hints. |
+| **Security.txt parser** | Contacts, disclosure policy, scope. |
+
+---
+
+### 🧠 2. Active Fuzzing & Vulnerability Probes  *(medium effort)*
+| Feature | Implementation Hint |
+|---|---|
+| **Nuclei / Jaeles wrapper** | JSON output → BlackVault; run templates in Docker micro-VM. |
+| **SQLi blind detection** | Time-based polyglots via `harvest_and_inject_forms()`. |
+| **SSRF / XXE OAST** | Use Burp Collaborator or interactsh payloads. |
+| **JWT / OAuth misconfig scan** | Decode tokens, test alg=none, weak secrets. |
+| **GraphQL introspection** | Auto-detect `/graphql`, dump schema, look for mutations. |
+
+---
+
+### 🕵️ 3. AI-Augmented Discovery  *(medium effort, huge ROI)*
+| Feature | Notes |
+|---|---|
+| **LLM endpoint prediction** | Feed discovered paths to a small LLM → predict next likely paths. |
+| **Content-type classifier** | Distinguish “static” vs “interesting” endpoints to prioritize fuzzing. |
+| **Stealth score ML** | Replace dummy `_compute_stealth_score()` with a tiny XGBoost model trained on (response-time-std, 4xx-ratio, WAF-trigger-rate). |
+
+---
+
+### 🔄 4. Resilience & Observability  *(low effort)*
+| Feature | Benefit |
+|---|---|
+| **Circuit-breaker** | After N 429/503, auto-backoff or switch proxy pool. |
+| **Progress bar / ETA** | tqdm or Rich live table in CLI; publish “progress” messages to Redis. |
+| **Canary tokens** | Inject unique URLs in forms; if hit later → confirm stored-XSS. |
+| **Checksum de-duplication** | Skip re-crawling pages with identical ETag/Content-Length.
+
+---
+
+### 🌐 5. Network & Infra Mapping  *(high effort, high value)*
+| Feature | How |
+|---|---|
+| **ASN / IP range enumeration** | BGP tools + masscan for entire CIDR. |
+| **CDN / WAF fingerprint** | Compare header anomalies vs public CDN lists. |
+| **DNS zone-transfer attempt** | AXFR query; fallback to NSEC-walking for DNSSEC. |
+| **Certificate Transparency live-stream** | Web-hook listener for new certs + auto-scan. |
+
+---
+
+### 🧩 6. Plugin & Template Ecosystem  *(medium effort)*
+| Feature | Details |
+|---|---|
+| **YAML rule engine** | Users drop `.yaml` files defining regex + severity + exploit hint. |
+| **Rust WASM plugins** | Re-use the existing `RustScriptHandler`; compile fuzzers to WASM sandbox. |
+| **Swagger / OpenAPI importer** | Auto-generate valid requests from spec → feed to SQLi / XSS probes. |
+
+---
+
+### 🚦 7. Stealth & OPSEC Upgrades  *(low effort)*
+| Feature | Tooling |
+|---|---|
+| **TCP/IP timing jitter** | Random per-packet delay using `scapy` raw sockets. |
+| **IPv6 dual-stack probing** | Many orgs forget IPv6 DNS entries → less monitored. |
+| **User-Agent rotation per request** | Pull fresh list from https://whatismybrowser.com/api. |
+| **Tor / SOCKS proxy chaining** | Built-in `--tor` flag; auto-verify circuit health. |
+
+---
+
+### 📊 8. Reporting & Correlation  *(medium effort)*
+| Feature | Output |
+|---|---|
+| **Neo4j graph export** | Nodes = (domain, IP, tech, vuln); edges = “hosts”, “uses”, “vulnerable_to”. |
+| **HTML + PDF executive report** | Jinja2 templates; severity heat-map. |
+| **Delta diff vs last scan** | Show “new hosts”, “new vulns”, “removed endpoints”. |
+
+---
+
+### 🧪 9. Red-Team Automation Hooks  *(low effort)*
+| Feature | Usage |
+|---|---|
+| **Webhook to Slack / Mattermost** | Push recon milestones in real-time. |
+| **Auto-launch Metasploit auxiliary modules** | If port 445 open → run `smb_version`. |
+| **C2 beacon after recon success** | `initiate_c2_session()` only if high-severity vulns found.
+
+---
+
+### 🚀 10. Cloud-Native Scaling  *(high effort)*
+| Feature | Notes |
+|---|---|
+| **Kubernetes CronJobs** | Nightly scans with Helm chart. |
+| **Horizontal sharding** | Assign `/24` subnets to each pod via SwarmMesh. |
+| **S3 / MinIO artifact storage** | Offload large blobs (screenshots, raw responses). |

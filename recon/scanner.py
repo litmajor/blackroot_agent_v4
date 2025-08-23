@@ -17,7 +17,10 @@ import dnstwist
 from Crypto.Random import get_random_bytes
 from fastapi import FastAPI
 from redis import Redis
+
+from .resilience import CircuitBreaker, ChecksumCache, make_canary
 from swarm_mesh import SwarmMesh
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -37,7 +40,7 @@ PROXY_POOL = [
 
 class ReconModule:
     """Performs advanced web reconnaissance with BlackVault and SwarmMesh integration."""
-    
+
     def __init__(self, vault, swarm: 'SwarmMesh', redis: Redis, logger: Optional[logging.Logger] = None):
         """
         Initializes the recon module with BlackVault and SwarmMesh.
@@ -57,6 +60,8 @@ class ReconModule:
         self.session.headers.update({"User-Agent": "BLACKROOT.Recon-Agent"})
         self.form_cache = self._load_form_cache()
         self.command_id = None
+        self.circuit = CircuitBreaker(failure_limit=5, timeout=60)
+        self.checksum_cache = ChecksumCache()
 
     def _save_form_cache(self):
         """Saves form cache to BlackVault."""
@@ -376,96 +381,148 @@ class ReconModule:
         self.logger.info("Brute-forcing common directories...")
         report['brute_dirs'] = self.brute_force_paths(target)
 
+        from rich.progress import Progress
+        from rich.console import Console
+        console = Console()
+
+        # pre-generate canary tokens
+        canaries = [make_canary(dom) for dom in scope_domains]
+
         def crawl(url: str, depth: int):
             if url in visited or depth > max_depth:
                 return
-            url_padded = self._random_query_pad(url)
-            headers = self._get_random_headers()
-            with self.lock:
-                visited.add(url)
-            backoff = 0
             try:
-                start = time.time()
-                r = self.session.get(url_padded, headers=headers, timeout=8, 
-                                   proxies=self._get_random_proxy(), verify=False)
-                elapsed = time.time() - start
-                if r.status_code in (403, 503) or elapsed > 10:
-                    self.logger.warning(f"WAF anomaly: {url} status={r.status_code} delay={elapsed:.1f}s")
-                    backoff = random.uniform(2, 10)
-                retry_after = r.headers.get('Retry-After')
-                if retry_after is not None:
-                    try:
-                        backoff = max(backoff, float(retry_after))
-                        self.logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
-                    except Exception:
-                        pass
-                else:
-                    xrlr = r.headers.get('X-RateLimit-Reset')
-                    if xrlr is not None:
-                        try:
-                            reset_time = float(xrlr)
-                            backoff = max(backoff, max(0, reset_time - time.time()))
-                            self.logger.info(f"Rate limit detected. Backing off for {backoff:.1f}s")
-                        except Exception:
-                            pass
-                if backoff > 0:
-                    time.sleep(backoff + random.uniform(0.5, 2.5))
-                
-                soup = BeautifulSoup(r.text, "html.parser")
-                html = r.text
-                endpoints.add(url)
-                emails.update(self.extract_emails(html))
-                secrets.update(self.extract_secrets(html))
-                tech.update(self.fingerprint_tech(dict(r.headers), html))
-                
-                if url.endswith("robots.txt"):
-                    for p in self.parse_robots(html, url):
-                        crawl(p, depth + 1)
-                if url.endswith("sitemap.xml"):
-                    for loc in self.parse_sitemap(html):
-                        crawl(loc, depth + 1)
-                
-                for form in soup.find_all("form"):
-                    if not isinstance(form, Tag):
-                        continue
-                    action = form.get("action") or url
-                    method = str(form.get("method", "get")).lower()
-                    inputs = [inp for inp in form.find_all("input") if isinstance(inp, Tag)]
-                    forms.append({
-                        'url': url,
-                        'action': action,
-                        'method': method,
-                        'inputs': [inp.get('name') for inp in inputs if inp.get('name')]
-                    })
-                
-                for script in soup.find_all("script"):
-                    if isinstance(script, Tag):
-                        src = script.get("src")
-                        if src and isinstance(src, str) and src.startswith("http"):
-                            js_endpoints.add(src)
-                        if script.string:
-                            js_endpoints.update(re.findall(r'https?://[\w\./\-_%]+', script.string))
-                
-                for link in soup.find_all("a"):
-                    if not isinstance(link, Tag):
-                        continue
-                    href = link.get("href")
-                    if href:
-                        absolute = urljoin(url, str(href))
-                        if any(domain in absolute for domain in scope_domains):
-                            crawl(absolute, depth + 1)
+                # --- circuit-breaker wrapped request ---
+                r = self.circuit.call(
+                    self.session.get,
+                    self._random_query_pad(url),
+                    headers=self._get_random_headers(),
+                    timeout=8,
+                    proxies=self._get_random_proxy(),
+                    verify=False,
+                )
+            except RuntimeError:
+                console.print(f"[red]Circuit breaker OPEN – skipping {url}[/]")
+                return
             except Exception as e:
-                self.logger.error(f"Crawl failed for {url}: {e}")
-                self.vault.store(f"crawl_error_{time.time()}", 
-                                json.dumps({"url": url, "error": str(e), "command_id": self.command_id}).encode())
+                self.logger.error("Request failed %s: %s", url, e)
+                return
+
+            # --- checksum de-duplication ---
+            if self.checksum_cache.seen(url, r.content):
+                return
+            visited.add(url)
+
+            # --- progress bar via Redis ---
+            self.redis.publish(self.swarm.channel, json.dumps({
+                "type": "progress",
+                "command_id": self.command_id,
+                "url": url,
+                "visited": len(visited)
+            }))
+
+            # --- same parsing logic you already have ---
+            soup = BeautifulSoup(r.text, "html.parser")
+            html = r.text
+            endpoints.add(url)
+            emails.update(self.extract_emails(html))
+            secrets.update(self.extract_secrets(html))
+            tech.update(self.fingerprint_tech(dict(r.headers), html))
+
+            if url.endswith("robots.txt"):
+                for p in self.parse_robots(html, url):
+                    crawl(p, depth + 1)
+            if url.endswith("sitemap.xml"):
+                for loc in self.parse_sitemap(html):
+                    crawl(loc, depth + 1)
+
+            for form in soup.find_all("form"):
+                if not isinstance(form, Tag):
+                    continue
+                action = form.get("action") or url
+                method = str(form.get("method", "get")).lower()
+                inputs = [inp for inp in form.find_all("input") if isinstance(inp, Tag)]
+                form_obj = {
+                    'url': url,
+                    'action': action,
+                    'method': method,
+                    'inputs': [inp.get('name') for inp in inputs if inp.get('name')]
+                }
+                # inject canary token into every form
+                form_obj.setdefault("canary", canaries[0])
+                forms.append(form_obj)
+
+            for script in soup.find_all("script"):
+                if isinstance(script, Tag):
+                    src = script.get("src")
+                    if src and isinstance(src, str) and src.startswith("http"):
+                        js_endpoints.add(src)
+                    if script.string:
+                        js_endpoints.update(re.findall(r'https?://[\w\./\-_%]+', script.string))
+
+            for link in soup.find_all("a"):
+                if not isinstance(link, Tag):
+                    continue
+                href = link.get("href")
+                if href:
+                    absolute = urljoin(url, str(href))
+                    if any(domain in absolute for domain in scope_domains):
+                        crawl(absolute, depth + 1)
 
         for path in ["admin", "login", "dashboard", "api", "robots.txt", "sitemap.xml"]:
             crawl(urljoin(target, path), 1)
         crawl(target, 1)
 
+
+
+        # ---------- PASSIVE ENRICHMENT (Week-1) ----------
+        passive_data = {}
+        try:
+            import passive
+            for dom in scope_domains:
+                passive_data[dom] = {
+                    "shodan": passive.shodan_lookup(dom),
+                    "wayback": passive.wayback_urls(dom, limit=500)
+                }
+        except Exception as e:
+            self.logger.warning(f"Passive enrichment failed: {e}")
+        report["passive"] = passive_data
+
+        # ---------- WEEK-2 ENRICHMENT ----------
+        plus = {}
+        try:
+            from recon.passive_plus import PassivePlus
+            for dom in scope_domains:
+                plus[dom] = {
+                    "dns": PassivePlus.dns_records(dom),
+                    "csp_domains": PassivePlus.csp_domains(target),
+                    "security_txt": PassivePlus.security_txt(target)
+                }
+            report["passive_plus"] = plus
+            # optional active scan (respect --stealth flag)
+            import inspect
+            frame = inspect.currentframe()
+            outer = frame.f_back if frame else None
+            kwargs = outer.f_locals if outer else {}
+            # if not kwargs.get("stealth"):
+            #     report["nuclei"] = PassivePlus.nuclei_scan(target)
+        except Exception as e:
+            self.logger.warning(f"Nuclei scan failed: {e}")
+
+
+        # ---------- WEEK-3 JWT + GraphQL ----------
+        try:
+            import recon.jwt_gql as jwt_gql
+            all_responses = [requests.get(url, timeout=5, verify=False).text
+                             for url in list(endpoints)[:50]]  # limit to avoid bloat
+            report["jwt_audit"] = jwt_gql.jwt_audit(all_responses)
+            report["graphql"] = jwt_gql.gql_introspection(target)
+        except Exception as e:
+            self.logger.warning(f"JWT/GraphQL enrichment failed: {e}")
+
         form_results, form_map = self.harvest_and_inject_forms(list(endpoints), target)
         xss_results = self.scan_for_xss(target, list(endpoints))
-        
+
         report['endpoints'] = list(endpoints)
         report['forms'] = forms
         report['js_endpoints'] = list(js_endpoints)
@@ -475,7 +532,7 @@ class ReconModule:
         report['form_results'] = form_results
         report['xss_results'] = xss_results
         report['command_id'] = self.command_id
-        
+
         try:
             self.vault.store(f"recon_{target}_{self.command_id}", json.dumps(report).encode())
             self.redis.publish(self.swarm.channel, json.dumps({
@@ -486,7 +543,7 @@ class ReconModule:
             self.logger.info(f"Recon complete: {len(endpoints)} endpoints, {len(forms)} forms, {len(js_endpoints)} JS endpoints")
         except Exception as e:
             self.logger.error(f"Failed to store recon report: {e}")
-        
+
         return report
 
 def fetch_crtsh_subdomains(domain: str) -> List[str]:
@@ -524,3 +581,48 @@ def dnstwist_permutations(domain: str) -> List[str]:
     except Exception as e:
         logging.getLogger('ReconModule').error(f"dnstwist error: {e}")
         return []
+    
+# ------------------------------------------------------------------
+#  ReconModule — lightweight storage helpers
+# ------------------------------------------------------------------
+def list_artifacts(self) -> list[str]:
+    """
+    Return every key currently stored in the vault.
+    If BlackVault does not yet expose .keys(), fall back to a SCAN
+    via Redis (assumes BlackVault uses Redis under the hood).
+    """
+    if hasattr(self.vault, "keys"):
+        return list(self.vault.keys())
+
+    # Fallback scan  (assumes self.vault.redis exists)
+    try:
+        return [
+            k.decode() if isinstance(k, bytes) else str(k)
+            for k in self.vault.redis.scan_iter("artifact:*")
+        ]
+    except Exception as exc:
+        self.logger.debug("list_artifacts() fallback failed: %s", exc)
+        return []
+
+
+def store_artifact(self, key: str, blob: bytes) -> None:
+    """Store raw bytes under key."""
+    self.vault.store(key, blob)
+
+
+def retrieve_artifact(self, key: str) -> bytes:
+    """Retrieve raw bytes for key or raise KeyError."""
+    data = self.vault.retrieve(key)
+    if data is None:
+        raise KeyError(key)
+    return data
+
+
+# Monkey-patch only if the helpers are missing
+for _meth_name, _meth in (
+        ("list_artifacts", list_artifacts),
+        ("store_artifact", store_artifact),
+        ("retrieve_artifact", retrieve_artifact),
+):
+    if not hasattr(ReconModule, _meth_name):
+        setattr(ReconModule, _meth_name, _meth)

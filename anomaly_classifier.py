@@ -1,3 +1,4 @@
+
 import os
 import json
 import random
@@ -8,6 +9,13 @@ import shutil
 import time
 from datetime import datetime
 import threading
+
+# ---------- JSON encoder ----------
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+        return super().default(o)
 
 # === Runtime Registration Hook ===
 try:
@@ -23,13 +31,21 @@ class SwarmAnomalySync:
         self.classifier = classifier
 
     def broadcast_profile(self):
-        payload = json.dumps(self.classifier.history).encode()
+        payload = json.dumps(self.classifier.history, cls=DateTimeEncoder).encode()
         print("[📡] Broadcasting anomaly profile to swarm...")
         try:
-            from black_vault import swarm, identity, capabilities
-            swarm.broadcast_capabilities(identity.replica_id, capabilities + ["anomaly_classifier"])
-        except Exception:
-            pass
+            # Try to import a global SwarmMesh instance
+            from swarm_mesh import SwarmMesh
+            import builtins
+            swarm = getattr(builtins, 'swarm', None)
+            if swarm is not None and isinstance(swarm, SwarmMesh):
+                node_id = getattr(swarm, 'node_id', 'anomaly_node')
+                capabilities = getattr(swarm, '_get_node_capabilities', lambda: [])()
+                swarm.broadcast_capabilities(node_id, list(capabilities) + ["anomaly_classifier"])
+            else:
+                print("[⚠️] No active SwarmMesh instance found for broadcast.")
+        except Exception as e:
+            print(f"[⚠️] Swarm broadcast failed: {e}")
 
     def sync_from_peer(self, profile_data):
         try:
@@ -83,22 +99,27 @@ class AnomalyClassifier:
     def adapt_strategy(self, category: str, value: float, z_score: float):
         print(f"[🔄] Adapting tactics for '{category}' due to anomaly...")
         try:
-            from black_vault import swarm
-            swarm.broadcast_capabilities("anomaly_response", [f"anomaly:{category}"])
-        except:
-            pass
+            from swarm_mesh import SwarmMesh
+            import builtins
+            swarm = getattr(builtins, 'swarm', None)
+            if swarm is not None and isinstance(swarm, SwarmMesh):
+                swarm.broadcast_capabilities("anomaly_response", [f"anomaly:{category}"])
+            else:
+                print("[⚠️] No active SwarmMesh instance found for anomaly response.")
+        except Exception as e:
+            print(f"[⚠️] Swarm anomaly response failed: {e}")
         try:
             from ghost_layer import GhostLayer
             gl = GhostLayer(
                 vault="anomaly_classifier"
             )
             gl.mutate_shellcode()
-        except:
-            pass
+        except Exception as e:
+            print(f"[⚠️] GhostLayer mutation failed: {e}")
 
     def export_model(self, path="anomaly_model.json"):
         with open(path, 'w') as f:
-            json.dump(self.history, f)
+            json.dump(self.history, f, cls=DateTimeEncoder)
         print(f"[💾] Behavior model exported to {path}")
 
     def import_model(self, path="anomaly_model.json"):

