@@ -104,6 +104,8 @@ def main() -> None:
     parser.add_argument("--no-dashboard", action="store_true",
                         help="Skip launching the web dashboard")
     parser.add_argument("--proxy", help="HTTP(S) proxy (e.g., http://127.0.0.1:8080)")
+    parser.add_argument("--repair-status", action="store_true", help="Show repair agent status")
+    parser.add_argument("--submit-repair", nargs=3, metavar=("NODE_ID", "TYPE", "PRIORITY"), help="Submit repair ticket")
     args = parser.parse_args()
 
     log.info("Target acquired: %s", args.target)

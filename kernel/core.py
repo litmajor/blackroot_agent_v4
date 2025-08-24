@@ -85,6 +85,33 @@ class BlackrootKernel:
             redis=Redis(host="localhost", port=6379, decode_responses=True)
         )
         self.agents = load_agents()
+        # --- Integrate ScoutAgent (Recon/Mapping) ---
+        try:
+            from agents.scout import ScoutAgent
+            scout_targets = self.config.get('scout_targets', [])
+            command_center = self.config.get('command_center', 'localhost:8888')
+            self.scout_agent = ScoutAgent(
+                agent_id=self.id,
+                initial_target_range=scout_targets,
+                command_center_address=command_center,
+                log_level=logging.INFO,
+                black_vault=self.black_vault
+            )
+            register_module("scout_agent", lambda: self.scout_agent)
+            self.logger.info("ScoutAgent integrated and registered as 'scout_agent' module.")
+        except Exception as e:
+            self.logger.warning(f"ScoutAgent integration failed: {e}")
+        # --- Integrate RepairAgent (Immune System) ---
+        try:
+            from agents.repair import RepairAgent
+            # Build node_registry from agents (or other system state)
+            self.node_registry = {a.codename: {'health': getattr(a, 'health', None), 'state': {}, 'configuration': {}, 'dependencies': getattr(a, 'dependencies', []), 'metrics': {}} for a in self.agents if hasattr(a, 'codename')}
+            self.repair_agent = RepairAgent(agent_id=self.id, node_registry=self.node_registry)
+            # Register as a module for global access
+            register_module("repair_agent", lambda: self.repair_agent)
+            self.logger.info("RepairAgent integrated and registered as 'repair_agent' module.")
+        except Exception as e:
+            self.logger.warning(f"RepairAgent integration failed: {e}")
         self.stealth = CloakSupervisor(self, stealth_threshold=config.get('stealth_threshold', 0.8))
         self.behaviour = BehaviorAdapter(self)
         self.mirrorcore = MirrorCore(self)
@@ -129,6 +156,13 @@ class BlackrootKernel:
             self.ghost_layer.run()
             self.swarm.connect()
             threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+            # Start RepairAgent (immune system) in background
+            try:
+                import asyncio
+                threading.Thread(target=lambda: asyncio.run(self.repair_agent.start()), daemon=True).start()
+                self.logger.info("RepairAgent started in background.")
+            except Exception as e:
+                self.logger.warning(f"RepairAgent start failed: {e}")
         except Exception as e:
             self.logger.error(f"Boot failed: {e}")
             self.shutdown()
@@ -193,6 +227,14 @@ class BlackrootKernel:
             self.swarm.disconnect()
         except Exception as e:
             self.logger.error(f"Swarm disconnect failed: {e}")
+        # Stop RepairAgent
+        try:
+            import asyncio
+            if hasattr(self, 'repair_agent'):
+                asyncio.run(self.repair_agent.stop())
+                self.logger.info("RepairAgent stopped.")
+        except Exception as e:
+            self.logger.warning(f"RepairAgent stop failed: {e}")
         self.logger.info("Shutdown complete.")
 
 if __name__ == "__main__":
