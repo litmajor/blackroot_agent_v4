@@ -1,27 +1,41 @@
 from agents.base import BaseAgent
 import os, shutil, tempfile, logging, stat, subprocess
 from pathlib import Path
+# --- Use core agent anatomy types ---
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 log = logging.getLogger("DEF-GLOOM")
 
 class DefilerAgent(BaseAgent):
-    def __init__(self):
-        super().__init__("DEF-GLOOM")
+    def __init__(self, agent_id: AgentID = AgentID(value="DEF-GLOOM")):
+        self.agent_id: AgentID = agent_id
+        super().__init__(str(self.agent_id))
         # aggressive vs passive
         self.aggressive = getattr(self, "priority", "normal") != "low"
 
     # ------------------------------------------------------------------
-    def run(self):
+    def run(self, mission: Mission = Mission(name="default", objectives=[], parameters={})):
         super().run()
         if not self.aggressive:
             log.info("Passive mode: minimal cleanup.")
+            # Emit Event for passive mode
+            event = Event(event_type="defiler_passive", payload={"agent": str(self.agent_id)}, sender_id=self.agent_id)
+            self._emit_event(event)
             return
 
         log.info("Full-stealth cleanup initiated.")
         self._nuke_logs()
+        self._emit_event(Event(event_type="logs_nuked", payload={}, sender_id=self.agent_id))
         self._nuke_cache()
+        self._emit_event(Event(event_type="cache_nuked", payload={}, sender_id=self.agent_id))
         self._nuke_temp()
+        self._emit_event(Event(event_type="temp_nuked", payload={}, sender_id=self.agent_id))
         self._shred_self()
+        self._emit_event(Event(event_type="self_shredded", payload={}, sender_id=self.agent_id))
+
+    def _emit_event(self, event: Event):
+        # Stub for event emission (to be integrated with event bus or kernel)
+        log.info(f"Event emitted: {event.event_type} for agent {getattr(event, 'sender_id', None)}")
 
     # ------------------------------------------------------------------
     def _secure_remove(self, path: Path):

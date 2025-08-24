@@ -11,25 +11,6 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad, unpad
 
-# --- Swarm, Identity, Capabilities stubs for integration ---
-class Swarm:
-    @staticmethod
-    def broadcast_capabilities(replica_id, capabilities):
-        print(f"[Stub] Swarm.broadcast_capabilities({replica_id}, {capabilities})")
-    class evolution:
-        @staticmethod
-        def update_composition(module, keys):
-            print(f"[Stub] Swarm.evolution.update_composition({module}, {keys})")
-
-class Identity:
-    replica_id = "standalone-replica"
-
-capabilities = ['mesh_networking', 'command_execution', 'anomaly_classifier']
-
-# For compatibility with 'from black_vault import swarm, identity, capabilities'
-swarm = Swarm
-identity = Identity
-
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
 

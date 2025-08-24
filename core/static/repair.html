@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Blackroot Repair Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #181c20; color: #e0e0e0; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 40px auto; background: #23272b; border-radius: 8px; box-shadow: 0 2px 8px #0008; padding: 32px; }
+        h1 { color: #7fffd4; }
+        label { display: block; margin-top: 1em; }
+        input, select, textarea { width: 100%; padding: 8px; margin-top: 4px; background: #181c20; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; }
+        button { margin-top: 1em; padding: 10px 24px; background: #7fffd4; color: #181c20; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        button:hover { background: #5ee6c1; }
+        .metrics { margin-top: 2em; background: #181c20; padding: 16px; border-radius: 6px; }
+        .success { color: #7fffd4; }
+        .error { color: #ff6b6b; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Repair Agent Dashboard</h1>
+    <div class="metrics" id="metrics">
+        <em>Loading repair agent status...</em>
+    </div>
+    <form id="repairForm">
+        <h2>Submit Repair Ticket</h2>
+        <label>Node ID <input type="text" name="node_id" required></label>
+        <label>Repair Type
+            <select name="repair_type">
+                <option value="PATCH">PATCH</option>
+                <option value="RESTORE">RESTORE</option>
+                <option value="REBUILD">REBUILD</option>
+                <option value="QUARANTINE">QUARANTINE</option>
+                <option value="ROLLBACK">ROLLBACK</option>
+                <option value="DEPENDENCY_FIX">DEPENDENCY_FIX</option>
+                <option value="MEMORY_REPAIR">MEMORY_REPAIR</option>
+                <option value="CONFIGURATION_FIX">CONFIGURATION_FIX</option>
+            </select>
+        </label>
+        <label>Priority
+            <select name="priority">
+                <option value="CRITICAL">CRITICAL</option>
+                <option value="HIGH">HIGH</option>
+                <option value="MEDIUM" selected>MEDIUM</option>
+                <option value="LOW">LOW</option>
+                <option value="BACKGROUND">BACKGROUND</option>
+            </select>
+        </label>
+        <label>Description <textarea name="description" rows="2"></textarea></label>
+        <button type="submit">Submit Ticket</button>
+        <div id="formMsg"></div>
+    </form>
+</div>
+<script>
+function fetchStatus() {
+    fetch('/repair/status')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Repair Agent Status</b><br>`;
+            for (const [k, v] of Object.entries(data)) {
+                html += `<b>${k}:</b> ${v}<br>`;
+            }
+            document.getElementById('metrics').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('metrics').innerHTML = '<span class="error">Failed to load status.</span>';
+        });
+}
+fetchStatus();
+setInterval(fetchStatus, 10000);
+
+document.getElementById('repairForm').onsubmit = function(e) {
+    e.preventDefault();
+    const form = e.target;
+    const data = {
+        node_id: form.node_id.value,
+        repair_type: form.repair_type.value,
+        priority: form.priority.value,
+        description: form.description.value
+    };
+    fetch('/repair/ticket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    })
+    .then(r => r.json())
+    .then(resp => {
+        if (resp.status === 'submitted') {
+            document.getElementById('formMsg').innerHTML = `<span class="success">Ticket ${resp.ticket_id} submitted!</span>`;
+            form.reset();
+        } else {
+            document.getElementById('formMsg').innerHTML = `<span class="error">Error: ${JSON.stringify(resp)}</span>`;
+        }
+    })
+    .catch(() => {
+        document.getElementById('formMsg').innerHTML = '<span class="error">Submission failed.</span>';
+    });
+};
+</script>
+</body>
+</html>

@@ -2,13 +2,16 @@ import time, psutil, logging, json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from agents.base import BaseAgent
+# --- Use core agent anatomy types ---
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 log = logging.getLogger("SENS-DAEMON")
 
 
 class SensorAgent(BaseAgent):
-    def __init__(self, cfg: Optional[dict] = None):
-        super().__init__("SENS-DAEMON")
+    def __init__(self, cfg: Optional[dict] = None, agent_id: AgentID = AgentID(value="SENS-DAEMON")):
+        self.agent_id: AgentID = agent_id
+        super().__init__(str(self.agent_id))
         cfg = cfg or {}
         self.interval = max(1, cfg.get("interval", 5))
         self.jitter = cfg.get("jitter", 0.2)          # ±20 % for stealth
@@ -16,7 +19,7 @@ class SensorAgent(BaseAgent):
         self.last_log = datetime.utcnow()
 
     # ------------------------------------------------------------------
-    def run(self):
+    def run(self, mission: Mission = Mission(name="default", objectives=[], parameters={})):
         super().run()
         log.info("System sensing started (interval %ss, jitter %s)", self.interval, self.jitter)
         while True:
@@ -27,6 +30,7 @@ class SensorAgent(BaseAgent):
 
             data = self._sample()
             self._dispatch(data)
+            self._emit_event(Event(event_type="sensor_sample", payload=data, sender_id=self.agent_id))
             self._maybe_log(data)
             time.sleep(self._jittered_sleep())
 
@@ -65,12 +69,23 @@ class SensorAgent(BaseAgent):
             mc.inject_beliefs(beliefs)
             mc.inject_emotions(emotions)
             for m in missions:
-                mc.dispatch_mission(m)
+                # Convert to Mission if not already
+                mission = m if isinstance(m, Mission) else Mission(
+                    name=m.get("task", m.get("name", "unknown")),
+                    objectives=m.get("objectives", []),
+                    parameters=m,
+                    status=m.get("status", "pending")
+                )
+                mc.dispatch_mission(mission)
 
         # 3. Exfil via SwarmMesh Redis
         redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
         if redis is not None:
             redis.publish("sensor_data", json.dumps(data, separators=(",", ":")))
+
+    def _emit_event(self, event: Event):
+        # Stub for event emission (to be integrated with event bus or kernel)
+        log.info(f"Event emitted: {event.event_type} for agent {getattr(event, 'sender_id', None)}")
 
     # ------------------------------------------------------------------
     def _classify(self, d: Dict) -> Optional[dict]:

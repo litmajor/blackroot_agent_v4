@@ -9,10 +9,13 @@ from agents.base import BaseAgent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PROP-SEED] %(message)s")
 log = logging.getLogger("PROP-SEED")
+# --- Use core agent anatomy types ---
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 class PropagationAgent(BaseAgent):
-    def __init__(self, config_path="config.json"):
-        super().__init__("PROP-SEED")
+    def __init__(self, config_path="config.json", agent_id: AgentID = AgentID(value="PROP-SEED")):
+        self.agent_id: AgentID = agent_id
+        super().__init__(str(self.agent_id))
         self.cfg = self._load_config(config_path)
         self.spawn_path = Path(self.cfg.get("spawn_path", "/tmp/blackroot_clone"))
         self.hosts: List[str] = self.cfg.get("hosts", ["127.0.0.1"])
@@ -31,12 +34,17 @@ class PropagationAgent(BaseAgent):
             return {}
 
     # ------------------------------------------------------------------
-    def run(self):
+    def run(self, mission: Mission = Mission(name="default", objectives=[], parameters={})):
         super().run()
         log.info("Initiating propagation logic...")
+        self._emit_event(Event(event_type="propagation_start", payload={"hosts": self.hosts}, sender_id=self.agent_id))
         for host in self.hosts:
             if self._reachable(host):
                 self._propagate(host)
+                self._emit_event(Event(event_type="propagated", payload={"host": host}, sender_id=self.agent_id))
+    def _emit_event(self, event: Event):
+        # Stub for event emission (to be integrated with event bus or kernel)
+        log.info(f"Event emitted: {event.event_type} for agent {getattr(event, 'sender_id', None)}")
 
     # ------------------------------------------------------------------
     def _reachable(self, host, port=22):

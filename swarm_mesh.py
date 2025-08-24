@@ -16,6 +16,7 @@ from typing import Dict, List, Callable, Optional, Any, Tuple, Set
 from dataclasses import dataclass, asdict
 from enum import Enum
 from redis import Redis
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 class BlackrootHost:
     # --- Mesh compatibility fields (dynamic, for peer tracking) ---
@@ -58,8 +59,9 @@ class BlackrootHost:
     Represents a real Blackroot runtime host (node) in the mesh.
     Encapsulates identity, capacity, roles, and loaded agents (abilities).
     """
-    def __init__(self, node_id: Optional[str] = None, roles: Optional[Set[str]] = None):
-        self.node_id = node_id or self._generate_node_id()
+    def __init__(self, agent_id: Optional[AgentID] = None, roles: Optional[Set[str]] = None):
+        self.agent_id: AgentID = agent_id or AgentID()
+        self.node_id = str(self.agent_id)
         self.identity = self._generate_identity()
         self.capacity = self._get_capacity()
         self.roles = set(roles) if roles else set()
@@ -587,51 +589,42 @@ class SecurityManager:
     
     def __init__(self, mesh_node: 'SwarmMesh'):
         self.mesh_node = mesh_node
-        self.trusted_nodes: Set[str] = set()
-        self.blacklisted_nodes: Set[str] = set()
+        self.trusted_nodes: Set[AgentID] = set()
+        self.blacklisted_nodes: Set[AgentID] = set()
         self.rate_limits: Dict[str, Dict[str, Any]] = {}  # node_id -> rate limit info
-        self.security_events: List[Dict[str, Any]] = []
+        self.security_events: List[Event] = []
     
     def authenticate_node(self, node_id: str, credentials: Dict[str, Any]) -> bool:
         """Authenticate a node attempting to join the mesh"""
-        # In a real implementation, this would verify certificates, tokens, etc.
-        # For demo, we'll use simple validation
-        
-        if node_id in self.blacklisted_nodes:
-            self._log_security_event("auth_blocked", node_id, "Node is blacklisted")
+        agent_id = AgentID(value=node_id) if not isinstance(node_id, AgentID) else node_id
+        if agent_id in self.blacklisted_nodes:
+            self._log_security_event("auth_blocked", agent_id, "Node is blacklisted")
             return False
-        
         # Check if credentials are valid
-        expected_token = hashlib.sha256(f"secret_{node_id}".encode()).hexdigest()
+        expected_token = hashlib.sha256(f"secret_{str(agent_id)}".encode()).hexdigest()
         provided_token = credentials.get('token', '')
-        
         if provided_token != expected_token:
-            self._log_security_event("auth_failed", node_id, "Invalid credentials")
+            self._log_security_event("auth_failed", agent_id, "Invalid credentials")
             return False
-        
-        self.trusted_nodes.add(node_id)
-        self._log_security_event("auth_success", node_id, "Node authenticated successfully")
+        self.trusted_nodes.add(agent_id)
+        self._log_security_event("auth_success", agent_id, "Node authenticated successfully")
         return True
     
     def authorize_command(self, command: Command) -> bool:
         """Authorize command execution"""
-        sender = command.sender
-        
+        sender_id = AgentID(value=command.sender) if not isinstance(command.sender, AgentID) else command.sender
         # Check if sender is trusted
-        if sender not in self.trusted_nodes and sender != self.mesh_node.node_id:
-            self._log_security_event("cmd_unauthorized", sender, f"Untrusted sender: {command.command_id}")
+        if sender_id not in self.trusted_nodes and str(sender_id) != str(self.mesh_node.node_id):
+            self._log_security_event("cmd_unauthorized", sender_id, f"Untrusted sender: {command.command_id}")
             return False
-        
         # Check rate limits
-        if not self._check_rate_limit(sender, command.command_type):
-            self._log_security_event("rate_limited", sender, f"Rate limit exceeded: {command.command_id}")
+        if not self._check_rate_limit(str(sender_id), command.command_type):
+            self._log_security_event("rate_limited", sender_id, f"Rate limit exceeded: {command.command_id}")
             return False
-        
         # Check command-specific permissions
-        if not self._check_command_permissions(sender, command):
-            self._log_security_event("permission_denied", sender, f"Permission denied: {command.command_id}")
+        if not self._check_command_permissions(str(sender_id), command):
+            self._log_security_event("permission_denied", sender_id, f"Permission denied: {command.command_id}")
             return False
-        
         return True
     
     def _check_rate_limit(self, node_id: str, command_type: CommandType) -> bool:
@@ -677,29 +670,25 @@ class SecurityManager:
         
         return True
     
-    def _log_security_event(self, event_type: str, node_id: str, description: str):
-        """Log a security event"""
-        event = {
-            'timestamp': datetime.now().isoformat(),
-            'event_type': event_type,
-            'node_id': node_id,
-            'description': description
-        }
-        
+    def _log_security_event(self, event_type: str, agent_id: AgentID, description: str):
+        """Log a security event using canonical Event type"""
+        event = Event(
+            event_type=event_type,
+            payload={"agent_id": str(agent_id), "description": description},
+            sender_id=agent_id
+        )
         self.security_events.append(event)
-        
         # Keep only last 1000 events
         if len(self.security_events) > 1000:
             self.security_events = self.security_events[-1000:]
-        
-        logger.warning(f"Security event [{event_type}] {node_id}: {description}")
+        logger.warning(f"Security event [{event_type}] {agent_id}: {description}")
     
     def get_security_report(self) -> Dict[str, Any]:
         """Generate security report"""
         return {
-            'trusted_nodes': list(self.trusted_nodes),
-            'blacklisted_nodes': list(self.blacklisted_nodes),
-            'recent_events': self.security_events[-50:],  # Last 50 events
+            'trusted_nodes': [str(aid) for aid in self.trusted_nodes],
+            'blacklisted_nodes': [str(aid) for aid in self.blacklisted_nodes],
+            'recent_events': [asdict(e) for e in self.security_events[-50:]],  # Last 50 events
             'rate_limit_status': {
                 node_id: {
                     'current_rate': len(info['commands']),
@@ -1067,8 +1056,8 @@ class SwarmMesh:
         """
         Initialize SwarmMesh node as a real BlackrootHost.
         """
-        self.host = BlackrootHost(node_id=node_id, roles=roles)
-        self.node_id = self.host.node_id
+        self.host = BlackrootHost(agent_id=AgentID(value=node_id), roles=roles)
+        self.node_id = str(self.host.agent_id)
         self.listen_port = listen_port
         self.discovery_port = discovery_port
         self.max_peers = max_peers
@@ -1076,22 +1065,22 @@ class SwarmMesh:
 
         # Network state
         self.status = NodeStatus.DISCONNECTED
-        self.peers: Dict[str, BlackrootHost] = {}  # peer_id -> BlackrootHost
-        self.leader_id: Optional[str] = None
+        self.peers = {}  # peer_id -> BlackrootHost
+        self.leader_id = None
         self.election_in_progress = False
 
         # Command handling
-        self.pending_commands: List[Command] = []
-        self.command_history: List[Command] = []
+        self.pending_commands = []
+        self.command_history = []
         self.max_history = 1000
 
         # Security and communication
         self.secure_channel = SecureChannel(self.node_id)
-        self.auth_tokens: Dict[str, str] = {}  # peer_id -> token
+        self.auth_tokens = {}  # peer_id -> token
         self.channel = 'blackroot_swarm'  # For compatibility with existing code
         # Threading and lifecycle
         self.running = False
-        self.threads: List[threading.Thread] = []
+        self.threads = []
         self.lock = threading.RLock()
 
         # Statistics
@@ -1194,22 +1183,20 @@ class SwarmMesh:
         """Attempt to establish connection with a specific peer"""
         # This would contain actual socket connection logic
         # For now, we'll simulate the connection
-        peer_id = f"peer_{address}_{port}"
-        
+        peer_agent_id = AgentID(value=f"peer_{address}_{port}")
+        peer_id = str(peer_agent_id)
         with self.lock:
             if len(self.peers) >= self.max_peers:
                 logger.warning("Maximum peer limit reached")
                 return False
-                
-            peer = BlackrootHost(node_id=peer_id)
+            peer = BlackrootHost(agent_id=peer_agent_id)
             peer.address = address
             peer.port = port
             from datetime import datetime
             peer.last_seen = datetime.now()
-            peer.status = NodeStatus.CONNECTED
+            peer.status = AgentStatus.ACTIVE
             peer.capabilities = []
             self.peers[peer_id] = peer
-        
         logger.debug(f"Established connection with peer {peer_id}")
         return True
 
@@ -1217,17 +1204,15 @@ class SwarmMesh:
         """Broadcast this node's identity to discover peers"""
         identity_message = {
             'type': 'identity_broadcast',
-            'node_id': self.node_id,
+            'node_id': str(self.node_id),
             'capabilities': self._get_node_capabilities(),
             'timestamp': datetime.now().isoformat(),
             'discovery_port': self.discovery_port
         }
-        
         try:
             # In a real implementation, this would use UDP multicast or a discovery service
             logger.info("Broadcasting identity for peer discovery")
             self._simulate_peer_discovery()
-            
         except Exception as e:
             logger.error(f"Failed to broadcast identity: {e}")
 
@@ -1257,34 +1242,27 @@ class SwarmMesh:
     def ping(self) -> Dict[str, bool]:
         """
         Ping all connected peers to check connectivity
-        
         Returns:
             Dictionary mapping peer_id to ping success status
         """
         results = {}
-        
         with self.lock:
             peers_to_ping = list(self.peers.keys())
-        
         logger.info(f"Pinging {len(peers_to_ping)} peers")
-        
         for peer_id in peers_to_ping:
             try:
                 # Simulate ping with random success/failure
                 success = random.random() > 0.1  # 90% success rate
-                results[peer_id] = success
-                
+                results[str(peer_id)] = success
                 if success:
                     with self.lock:
                         if peer_id in self.peers:
                             self.peers[peer_id].last_seen = datetime.now()
                 else:
                     logger.warning(f"Ping failed for peer {peer_id}")
-                    
             except Exception as e:
                 logger.error(f"Error pinging peer {peer_id}: {e}")
-                results[peer_id] = False
-        
+                results[str(peer_id)] = False
         return results
 
     def _heartbeat_loop(self):
@@ -1840,4 +1818,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

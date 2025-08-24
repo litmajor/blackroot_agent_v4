@@ -1,3 +1,4 @@
+# --- RepairAgent endpoints ---
 #!/usr/bin/env python3
 """
 BLACKROOT C2 – WRAITHNET node
@@ -7,9 +8,10 @@ import asyncio, json, os, sys, base64, threading, uuid, logging
 import redis.asyncio as aioredis
 import redis
 import websockets
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any
+from dataclasses import asdict
 
 # --- path hack for assimilate ---
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "assimilate", "src")))
@@ -73,6 +75,118 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
+from economic.wallet import WalletManager, EnhancedEconomicMixin
+from economic.bel_layer import EconomicV3Mixin
+from kernel.core import BlackrootKernel
+
+# --- Wallet & BEL Integration ---
+kernel = BlackrootKernel(config={})
+wallet_manager = WalletManager(redis_client)
+econ_agent = EnhancedEconomicMixin(kernel)
+
+# --- Wallet Endpoints ---
+@app.post("/wallet/create")
+async def wallet_create(req: Request):
+    body = await req.json()
+    agent_id = body["agent_id"]
+    networks = body.get("networks", ["ethereum"])
+    wallets = await wallet_manager.create_wallet(agent_id, networks)
+    return {"wallets": {n: asdict(w) for n, w in wallets.items()}}
+
+@app.get("/wallet/portfolio/{agent_id}")
+async def wallet_portfolio(agent_id: str):
+    econ_agent.agent_id = agent_id
+    portfolio = await econ_agent.get_wallet_portfolio()
+    return portfolio
+
+@app.post("/wallet/update_balance")
+async def wallet_update_balance(req: Request):
+    body = await req.json()
+    agent_id = body["agent_id"]
+    network = body["network"]
+    await wallet_manager.update_balance(agent_id, network)
+    return {"status": "updated"}
+
+@app.post("/wallet/send")
+async def wallet_send(req: Request):
+    body = await req.json()
+    tx_hash = await wallet_manager.sign_and_send_transaction(
+        body["from_agent"], body["network"], {
+            "to": body["to_agent"],
+            "amount": body["amount"],
+            "token_address": body.get("token_address")
+        }
+    )
+    return {"tx_hash": tx_hash}
+
+@app.post("/wallet/bridge")
+async def wallet_bridge(req: Request):
+    body = await req.json()
+    econ_agent.agent_id = body["agent_id"]
+    tx_id = await econ_agent.bridge_assets(
+        body["from_network"], body["to_network"], body["amount"], body.get("token_address")
+    )
+    return {"tx_id": tx_id}
+
+@app.post("/wallet/optimize_liquidity")
+async def wallet_optimize_liquidity(req: Request):
+    body = await req.json()
+    econ_agent.agent_id = body["agent_id"]
+    moves = await econ_agent.execute_liquidity_optimization()
+    return {"executed_moves": moves}
+
+@app.get("/wallet/opportunities/{agent_id}")
+async def wallet_opportunities(agent_id: str):
+    econ_agent.agent_id = agent_id
+    opps = await econ_agent.get_cross_chain_opportunities()
+    return opps
+
+# --- BEL Economic Layer Endpoints ---
+@app.get("/bel/status/{agent_id}")
+async def bel_status(agent_id: str):
+    econ_agent.agent_id = agent_id
+    return await econ_agent.my_status()
+
+@app.post("/bel/order")
+async def bel_order(req: Request):
+    body = await req.json()
+    econ_agent.agent_id = body["agent_id"]
+    if body["side"] == "buy":
+        ok = await econ_agent.place_buy_order(body["amount"], body["price"])
+    else:
+        ok = await econ_agent.place_sell_order(body["amount"], body["price"])
+    return {"status": "placed" if ok else "failed"}
+
+@app.post("/bel/cancel_order")
+async def bel_cancel_order(req: Request):
+    body = await req.json()
+    econ_agent.agent_id = body["agent_id"]
+    ok = await econ_agent.cancel_order(body["order_id"])
+    return {"status": "cancelled" if ok else "not_found"}
+
+@app.get("/bel/market_price")
+async def bel_market_price():
+    price = await econ_agent.get_market_price()
+    return {"market_price": price}
+
+@app.post("/bel/stake")
+async def bel_stake(req: Request):
+    body = await req.json()
+    econ_agent.agent_id = body["agent_id"]
+    ok = await econ_agent.stake(body["amount"])
+    return {"status": "staked" if ok else "failed"}
+
+@app.post("/bel/unstake")
+async def bel_unstake(req: Request):
+    body = await req.json()
+    econ_agent.agent_id = body["agent_id"]
+    ok = await econ_agent.unstake(body["amount"])
+    return {"status": "unstaked" if ok else "failed"}
+
+@app.get("/bel/system_health")
+async def bel_system_health():
+    return await econ_agent.system_health()
+
 
 @app.post("/assimilate")
 async def assimilate(req: Request):
@@ -132,6 +246,93 @@ async def run_now(req: Request):
         vault.store(name, blob)
     result = agent.execute_blob(blob)
     return {"executed": True, "output": result}
+
+# --- ScoutAgent API Endpoints ---
+from kernel.core import module_registry
+from fastapi import Request
+
+@app.get("/scout/status")
+def scout_status():
+    scout = module_registry["scout_agent"]()
+    return {
+        "agent_id": str(scout.agent_id),
+        "operational_status": str(scout.operational_status),
+        "last_report_time": getattr(scout, "last_report_time", None),
+        "current_tactical_mode": getattr(scout, "current_tactical_mode_config", {}).get("description", "unknown"),
+        "target_range": getattr(scout, "initial_target_range", []),
+    }
+
+@app.get("/scout/nodes")
+def scout_nodes():
+    scout = module_registry["scout_agent"]()
+    return {
+        "count": len(scout.known_nodes),
+        "nodes": [n.to_dict() for n in scout.known_nodes.values()]
+    }
+
+@app.post("/scout/start")
+async def scout_start():
+    scout = module_registry["scout_agent"]()
+    import asyncio
+    asyncio.create_task(scout.start())
+    return {"status": "started"}
+
+@app.post("/scout/stop")
+async def scout_stop():
+    scout = module_registry["scout_agent"]()
+    import asyncio
+    asyncio.create_task(scout.stop())
+    return {"status": "stopping"}
+
+@app.post("/scout/add_targets")
+async def scout_add_targets(request: Request):
+    body = await request.json()
+    targets = body.get("targets", [])
+    scout = module_registry["scout_agent"]()
+    scout.initial_target_range.extend(targets)
+    return {"status": "targets_added", "targets": targets}
+
+@app.post("/scout/set_mode")
+async def scout_set_mode(request: Request):
+    body = await request.json()
+    mode = body.get("mode")
+    params = body.get("custom_parameters", {})
+    scout = module_registry["scout_agent"]()
+    if mode:
+        from agents.scout import TacticalModes
+        scout.current_tactical_mode_config = TacticalModes.configure_mode(mode, params)
+        return {"status": "mode_set", "mode": mode, "params": params}
+    return {"status": "no_mode_specified"}
+
+@app.post("/scout/force_report")
+async def scout_force_report():
+    scout = module_registry["scout_agent"]()
+    await scout._compile_and_send_report()
+    return {"status": "report_sent"}
+
+# --- End ScoutAgent API Endpoints ---
+
+# --- RepairAgent API Endpoints ---
+from kernel.core import module_registry
+
+@app.get("/repair/status")
+def repair_status():
+    repair_agent = module_registry["repair_agent"]()
+    return repair_agent.get_metrics()
+
+@app.post("/repair/ticket")
+def submit_repair_ticket(ticket: dict = Body(...)):
+    repair_agent = module_registry["repair_agent"]()
+    from agents.repair import RepairTicket, RepairType, RepairPriority
+    t = RepairTicket(
+        node_id=ticket["node_id"],
+        repair_type=RepairType[ticket.get("repair_type", "PATCH")],
+        priority=RepairPriority[ticket.get("priority", "MEDIUM")],
+        description=ticket.get("description", "")
+    )
+    import asyncio
+    asyncio.create_task(repair_agent.submit_repair_ticket(t))
+    return {"status": "submitted", "ticket_id": t.id}
 
 # ---------- REDIS LISTENER ----------
 def redis_listener():

@@ -1,6 +1,8 @@
 import time, logging, json, uuid, random
 from datetime import datetime, timedelta
 from agents.base import BaseAgent
+# --- Use core agent anatomy types ---
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 log = logging.getLogger("REFLECT-DELTA")
 
@@ -37,14 +39,25 @@ class ReflectionAgent(BaseAgent):
         self._refine_missions(mirrorcore)
 
         # Build snapshot
+        mission_queue = getattr(mirrorcore, "mission_queue", []) if mirrorcore else []
+        # Convert to Mission objects if not already
+        mission_objs = [m if isinstance(m, Mission) else Mission(
+            name=m.get("task", m.get("name", "unknown")),
+            objectives=m.get("objectives", []),
+            parameters=m,
+            status=m.get("status", "pending")
+        ) for m in mission_queue]
         snapshot = {
             "timestamp": datetime.utcnow().isoformat(),
             "source": self.codename,
             "peer_scores": peer_scores,
             "conflicts": conflicts,
             "beliefs": getattr(mirrorcore, "beliefs", {}) if mirrorcore else {},
-            "missions": getattr(mirrorcore, "mission_queue", []) if mirrorcore else [],
+            "missions": [m.__dict__ for m in mission_objs],
         }
+
+        # Emit Event for snapshot
+        event = Event(event_type="reflection_snapshot", payload=snapshot)
 
         # Persist
         if storage:
@@ -98,7 +111,14 @@ class ReflectionAgent(BaseAgent):
             return
         queue = getattr(mirrorcore, "mission_queue", [])
         cutoff = time.time() - 3600
-        fresh = [m for m in queue if not m.get("completed") and m.get("timestamp", 0) > cutoff]
+        # Convert to Mission objects if not already
+        mission_objs = [m if isinstance(m, Mission) else Mission(
+            name=m.get("task", m.get("name", "unknown")),
+            objectives=m.get("objectives", []),
+            parameters=m,
+            status=m.get("status", "pending")
+        ) for m in queue]
+        fresh = [m for m in mission_objs if not getattr(m, "completed", False) and getattr(m, "timestamp", time.time()) > cutoff]
         mirrorcore.mission_queue = fresh
 
     # ------------------------------------------------------------------

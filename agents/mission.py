@@ -3,6 +3,8 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional
 from agents.base import BaseAgent
+# --- Use core agent anatomy types ---
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 log = logging.getLogger("MIS-EXECUTOR")
 
@@ -36,42 +38,46 @@ class MissionAgent(BaseAgent):
 
             # Pop missions and submit to thread-pool
             while buffer.tasks:
-                mission = buffer.tasks.pop(0)
+                m = buffer.tasks.pop(0)
+                # Accept both dict and Mission
+                mission = m if isinstance(m, Mission) else Mission(
+                    name=m.get("task", "unknown"),
+                    objectives=m.get("objectives", []),
+                    parameters=m,
+                    status=m.get("status", "pending")
+                )
                 self.executor.submit(self._execute_with_retry, mission)
 
             time.sleep(0.2)  # small sleep to reduce CPU spin
 
     # ------------------------------------------------------------------
-    def _execute_with_retry(self, mission: Dict[str, Any]):
-        task = mission.get("task", "unknown")
-        log.debug("Executing task: %s", task)
-
-        # SwarmMesh start telemetry
+    def _execute_with_retry(self, mission: Mission):
+        log.debug("Executing mission: %s", mission.name)
         redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
+        # Emit Event for mission start
+        event_start = Event(event_type="mission_start", payload={"mission_id": mission.mission_id, "name": mission.name, "ts": datetime.utcnow().isoformat()})
         if redis:
-            redis.publish(
-                "mission_start",
-                json.dumps({"id": str(uuid.uuid4()), "task": task, "ts": datetime.utcnow().isoformat()}, separators=(",", ":")),
-            )
-
+            redis.publish("mission_start", json.dumps(event_start.payload))
         for attempt in range(1, self.retry_limit + 1):
             try:
-                self._dispatch(task, mission)
-                # Swarm success telemetry
+                self._dispatch(mission.name, mission)
+                # Emit Event for mission done
+                event_done = Event(event_type="mission_done", payload={"mission_id": mission.mission_id, "name": mission.name, "status": "done"})
                 if redis:
-                    redis.publish("mission_done", json.dumps({"task": task, "status": "done"}))
-                return  # success
+                    redis.publish("mission_done", json.dumps(event_done.payload))
+                return
             except Exception as exc:
-                log.warning("Task %s failed (attempt %s/%s): %s", task, attempt, self.retry_limit, exc)
+                log.warning("Mission %s failed (attempt %s/%s): %s", mission.name, attempt, self.retry_limit, exc)
                 if attempt < self.retry_limit:
                     time.sleep(self.backoff_base * (2 ** (attempt - 1)) * random.uniform(0.5, 1.5))
                 else:
-                    log.error("Task %s permanently failed.", task)
+                    log.error("Mission %s permanently failed.", mission.name)
+                    event_err = Event(event_type="mission_error", payload={"mission_id": mission.mission_id, "name": mission.name, "error": str(exc)})
                     if redis:
-                        redis.publish("mission_error", json.dumps({"task": task, "error": str(exc)}))
+                        redis.publish("mission_error", json.dumps(event_err.payload))
 
     # ------------------------------------------------------------------
-    def _dispatch(self, task: str, mission: Dict[str, Any]):
+    def _dispatch(self, task: str, mission: Mission):
         handler = {
             "deep_scan": self._deep_scan,
             "monitor_changes": self._monitor_changes,
@@ -80,19 +86,19 @@ class MissionAgent(BaseAgent):
         handler(mission)
 
     # ------------------------------------------------------------------
-    def _deep_scan(self, _):
-        log.debug("Deep scan stub executed")
+    def _deep_scan(self, mission: Mission):
+        log.debug("Deep scan stub executed for mission %s", mission.mission_id)
         time.sleep(2)
 
-    def _monitor_changes(self, _):
-        log.debug("Monitor stub executed")
+    def _monitor_changes(self, mission: Mission):
+        log.debug("Monitor stub executed for mission %s", mission.mission_id)
         time.sleep(2)
 
-    def _apply_patch(self, _):
-        log.debug("Patch stub executed")
+    def _apply_patch(self, mission: Mission):
+        log.debug("Patch stub executed for mission %s", mission.mission_id)
         time.sleep(2)
 
-    def _unknown_task(self, mission):
+    def _unknown_task(self, mission: Mission):
         log.error("Unknown task: %s", mission)
 
     # ------------------------------------------------------------------
