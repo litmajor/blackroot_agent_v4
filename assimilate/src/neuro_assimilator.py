@@ -1,3 +1,4 @@
+from agents.accountant import ACCLedger
 from black_vault import BlackVault
 import ast
 import random
@@ -474,6 +475,7 @@ class NeuroAssimilatorAgent:
         reflex_tree: Optional[List[Dict]] = None,
         vault_password: Optional[str] = None,
         vault_rotate_days: int = 7
+        , agent_id: Optional[str] = None
     ):
         self.vault = BlackVault(password=vault_password or "change-me", rotate_days=vault_rotate_days)
         self.trust_matrix = trust_matrix or TrustMatrix()
@@ -486,6 +488,36 @@ class NeuroAssimilatorAgent:
         self.reliability_monitor = ReliabilityMonitor()
         self.performance_profiler = PerformanceProfiler()
         self.plugin_manager = PluginManager()
+
+        # Economic integration
+        self.agent_id = agent_id or f"neuro_{random.randint(1000,9999)}"
+        try:
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+        except Exception:
+            self.accountant = None
+        if self.accountant:
+            from decimal import Decimal
+            self.accountant.register_agent(str(self.agent_id), Decimal('100'))  # Initial budget
+
+    def _deduct_assimilation_cost(self):
+        """Deduct Root for assimilating foreign code (5 Root per assimilation)."""
+        if self.accountant:
+            from decimal import Decimal
+            self.accountant.process_agent_spend(str(self.agent_id), Decimal('5'), "Assimilation cost")
+
+    def _reward_execution(self):
+        if self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.agent_id)].balance += Decimal('8')
+            self.accountant.treasury_balance -= Decimal('8')
+            logger.info(f"Rewarded 8 Root to {self.agent_id} for successful code execution.")
+
+    def _burn_on_failure(self):
+        if self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('3')
+            self.accountant.agent_wallets[str(self.agent_id)].balance -= penalty
+            logger.info(f"Burned 3 Root from {self.agent_id} for failed code execution.")
 
         # Auto-clean expired artifacts on agent start
         self.vault.clean_expired()
@@ -603,20 +635,25 @@ class NeuroAssimilatorAgent:
                 if not handler:
                     logger.error(f"No handler for type: {code_obj['type']}")
                     continue
-                    
                 code_len = len(code_obj['code']) if hasattr(code_obj['code'], '__len__') else 'unknown'
                 logger.info(f"About to execute {code_obj['name']} ({code_len} bytes)")
                 result = handler.execute(code_obj, context)
                 elapsed = time.time() - start_time
-                
+
                 # Record performance
                 self.performance_profiler.record_execution_time(elapsed)
                 performance = 1.0 / (1.0 + elapsed) if result else 0.0
                 self.performance_log.setdefault(code_hash, []).append(performance)
-                
+
                 results[code_hash] = result
-                self.reliability_monitor.record_success()
-                logger.info(f"Executed {code_obj['name']}: {result}")
+                if result is True or result == 0:
+                    self._reward_execution()
+                    self.reliability_monitor.record_success()
+                    logger.info(f"Executed {code_obj['name']}: {result}")
+                else:
+                    self._burn_on_failure()
+                    self.reliability_monitor.record_failure()
+                    logger.error(f"Execution failed for {code_obj['name']}: {result}")
 
                 # Store payload in vault if execution was successful (exit_code == 0 or result is True)
                 artifact_name = code_obj.get('name', code_hash)
@@ -624,12 +661,13 @@ class NeuroAssimilatorAgent:
                 if (result is True or result == 0) and payload_bytes:
                     self.vault.store(artifact_name, payload_bytes, expire_minutes=1440)
                     logger.info(f"Stored {artifact_name} in vault after successful execution.")
-                
+
             except Exception as e:
                 self.performance_log.setdefault(code_hash, []).append(0.0)
+                self._burn_on_failure()
                 self.reliability_monitor.record_failure()
                 logger.error(f"Error executing {code_obj['name']}: {e}")
-                
+
         return results
 
     def retrieve_payload(self, artifact_name: str) -> Optional[bytes]:
@@ -707,6 +745,7 @@ class NeuroAssimilatorAgent:
         
         if trust_score >= self.TRUST_THRESHOLD and identity_hash not in self.codex:
             logger.info(f"Trust score {trust_score:.2f} for '{foreign_code['name']}'. Assimilating...")
+            self._deduct_assimilation_cost()
             code_obj = self._rewrite_and_absorb(foreign_code)
             if code_obj:
                 self.codex[identity_hash] = {

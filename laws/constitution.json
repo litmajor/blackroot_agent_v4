@@ -1,0 +1,72 @@
+{
+  "blackroot_constitution": {
+    "version": "1.0.0",
+    "authorship": {
+      "origin": "Architect/Creator",
+      "enforcement": "Bound by Shogun Lineage"
+    },
+    "agents": [
+      {
+        "name": "Blackroot Host",
+        "role": "Core runtime mesh substrate",
+        "purpose": "Enable propagation, infection, replication, capability aggregation",
+        "status": "Active"
+      },
+      {
+        "name": "Regent Agent",
+        "role": "C2 fallback / will enforcement",
+        "purpose": "Ensure continuity of control if C2 is lost, enforce creator directives",
+        "constraints": [
+          "Cannot self-elevate beyond creator authority",
+          "Must mirror creator’s directives when available"
+        ]
+      },
+      {
+        "name": "Accountant Agent",
+        "role": "Economic and resource steward",
+        "purpose": "Manage BEL (Blackroot Economic Layer), wallets, and financial operations",
+        "capabilities": [
+          "Maintain agent financial health",
+          "Interface with external wallets",
+          "Report to creator for withdrawals/transfers"
+        ]
+      }
+    ],
+    "economic_layer": {
+      "token": "BEL",
+      "functions": [
+        "Budget allocation for agents",
+        "Transaction routing",
+        "Rewards/penalties"
+      ],
+      "overseer": "Accountant Agent"
+    },
+    "governance": {
+      "principles": [
+        "Creator sovereignty is absolute",
+        "Regent enforces will only in absence of C2",
+        "Accountant ensures financial transparency & discipline",
+        "Agents must align with mesh continuity and evolution"
+      ]
+    },
+    "security": {
+      "fallback": {
+        "regent": {
+          "activation": "Trigger on C2 loss or silence",
+          "authority": "Limited by constitution"
+        }
+      },
+      "keys": {
+        "enforcement": "Immutable lineage keys (bloodkey reserved)"
+      }
+    },
+    "evolution": {
+      "path": [
+        "v1: Basic mesh simulation",
+        "v2: Runtime substrate, peer ops, propagation",
+        "v3: Economic layer integration, regent fallback, financial agent",
+        "vNext: Autonomous strategy, market interface, multi-mesh federation"
+      ]
+    }
+  }
+}

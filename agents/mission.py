@@ -1,15 +1,43 @@
 import time, logging, json, uuid, random
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from agents.base import BaseAgent
 # --- Use core agent anatomy types ---
 from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
+
+# --- Phase 2.4 Mission Implementation Modules ---
+try:
+    from recon.mission_executor import get_mission_executor, MissionExecutor, PatchInfo, ScanResult
+    MISSION_EXECUTOR_AVAILABLE = True
+except ImportError:
+    MISSION_EXECUTOR_AVAILABLE = False
+
+try:
+    from core.file_monitor import get_file_monitor, FileMonitor, MonitorResult
+    FILE_MONITOR_AVAILABLE = True
+except ImportError:
+    FILE_MONITOR_AVAILABLE = False
+
+try:
+    from core.patch_manager import get_patch_manager, PatchManager, PatchInfo as PatchInfo2, PatchResult
+    PATCH_MANAGER_AVAILABLE = True
+except ImportError:
+    PATCH_MANAGER_AVAILABLE = False
+
+# --- Phase 2.5: Mission Approval Enforcement ---
+try:
+    from agents.enforcer import EnforcerAgent
+    ENFORCER_AVAILABLE = True
+except ImportError:
+    ENFORCER_AVAILABLE = False
 
 log = logging.getLogger("MIS-EXECUTOR")
 
 
 class MissionAgent(BaseAgent):
+    def should_activate(self, config):
+        return self.codename in config.get("agent_whitelist", [])
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__("MIS-EXECUTOR")
         cfg = cfg or {}
@@ -20,6 +48,20 @@ class MissionAgent(BaseAgent):
         self.last_log = datetime.utcnow()
         self.running = True
         self.executor = ThreadPoolExecutor(max_workers=self.workers)
+        
+        # --- Phase 2.4: Initialize real mission executors ---
+        self.mission_executor = get_mission_executor() if MISSION_EXECUTOR_AVAILABLE else None
+        self.file_monitor = None
+        if FILE_MONITOR_AVAILABLE:
+            # Skip baseline during init (too slow for tests), start async if needed
+            self.file_monitor = get_file_monitor(skip_baseline=True, baseline_timeout=5)
+            # Optional: Start baseline in background
+            # self.file_monitor.start_baseline_async()
+        
+        self.patch_manager = get_patch_manager() if PATCH_MANAGER_AVAILABLE else None
+        
+        log.info("Mission executors initialized (MissionExecutor=%s, FileMonitor=%s, PatchManager=%s)",
+                 MISSION_EXECUTOR_AVAILABLE, FILE_MONITOR_AVAILABLE, PATCH_MANAGER_AVAILABLE)
 
     # ------------------------------------------------------------------
     def run(self):
@@ -53,6 +95,27 @@ class MissionAgent(BaseAgent):
     # ------------------------------------------------------------------
     def _execute_with_retry(self, mission: Mission):
         log.debug("Executing mission: %s", mission.name)
+        
+        # Phase 2.5: Check mission approval before execution
+        if ENFORCER_AVAILABLE:
+            enforcer = self._get_enforcer()
+            if enforcer:
+                approval = self._check_mission_approval(enforcer, mission)
+                if not approval.get("approved", False):
+                    log.warning(f"Mission {mission.name} DENIED: {approval.get('reason', 'Unknown')}")
+                    event_denied = Event(
+                        event_type="mission_denied",
+                        payload={
+                            "mission_id": mission.mission_id,
+                            "name": mission.name,
+                            "reason": approval.get("reason", "Constitutional violation"),
+                        }
+                    )
+                    redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
+                    if redis:
+                        redis.publish("mission_denied", json.dumps(event_denied.payload))
+                    return
+        
         redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
         # Emit Event for mission start
         event_start = Event(event_type="mission_start", payload={"mission_id": mission.mission_id, "name": mission.name, "ts": datetime.utcnow().isoformat()})
@@ -87,23 +150,335 @@ class MissionAgent(BaseAgent):
 
     # ------------------------------------------------------------------
     def _deep_scan(self, mission: Mission):
-        log.debug("Deep scan stub executed for mission %s", mission.mission_id)
-        time.sleep(2)
+        """Real vulnerability scanning with nmap integration."""
+        log.info("Deep scan mission %s: Executing real vulnerability scan", mission.mission_id)
+        
+        # Extract target from mission parameters
+        target_ip = mission.parameters.get("target") or mission.parameters.get("target_ip")
+        target_port = mission.parameters.get("port") or mission.parameters.get("target_port")
+        aggressive = mission.parameters.get("aggressive", False)
+        timeout = mission.parameters.get("timeout", 30)
+        
+        if not target_ip:
+            log.error("Deep scan failed: No target specified")
+            return {"status": "failed", "error": "No target IP provided"}
+        
+        try:
+            if MISSION_EXECUTOR_AVAILABLE and self.mission_executor:
+                # Real nmap scan
+                log.debug(f"Scanning target {target_ip} with aggressive={aggressive}")
+                result = self.mission_executor.scan_target(
+                    target_ip=target_ip,
+                    target_port=target_port,
+                    aggressive=aggressive,
+                    timeout=timeout
+                )
+                
+                scan_data = result.to_dict()
+                log.info(f"Scan result: {len(result.vulnerabilities)} vulnerabilities, "
+                        f"{result.critical_count} critical, {result.exploit_count} exploitable")
+                
+                # Store scan result in mission data
+                mission.data["scan_result"] = scan_data
+                mission.data["status"] = "completed"
+                
+                # Deduct economic cost
+                self._deduct_scan_cost(len(result.vulnerabilities), result.critical_count)
+                
+                return scan_data
+            else:
+                # Fallback to simulation
+                log.warning("MissionExecutor unavailable, using fallback simulation")
+                return self._fallback_scan_simulation(target_ip)
+        
+        except Exception as e:
+            log.error(f"Deep scan failed: {e}")
+            mission.data["status"] = "failed"
+            mission.data["error"] = str(e)
+            return {"status": "failed", "error": str(e)}
+    
+    def _fallback_scan_simulation(self, target_ip: str) -> Dict:
+        """Fallback simulation when MissionExecutor unavailable."""
+        return {
+            "target_ip": target_ip,
+            "status": "simulated",
+            "vulnerabilities": [
+                {"port": 22, "service": "openssh", "cve": "CVE-2018-15473", "severity": "medium"},
+                {"port": 80, "service": "apache", "cve": "CVE-2021-41773", "severity": "critical"},
+            ],
+            "critical_count": 1,
+            "exploit_count": 1,
+        }
+    
+    def _deduct_scan_cost(self, vuln_count: int, critical_count: int) -> None:
+        """Deduct economic cost for deep scan."""
+        # Base cost: 50 units
+        # Additional: 10 units per vulnerability, 50 units per critical
+        cost = 50 + (vuln_count * 10) + (critical_count * 50)
+        vault = getattr(getattr(self.kernel, "economic", None), "vault", None)
+        if vault:
+            try:
+                vault.deduct_balance(self.codename, cost, "deep_scan_cost")
+                log.debug(f"Deducted {cost} units for deep scan")
+            except Exception as e:
+                log.warning(f"Failed to deduct cost: {e}")
 
     def _monitor_changes(self, mission: Mission):
-        log.debug("Monitor stub executed for mission %s", mission.mission_id)
-        time.sleep(2)
+        """Real file/process monitoring with change detection."""
+        log.info("Monitor changes mission %s: Executing real monitoring", mission.mission_id)
+        
+        monitor_type = mission.parameters.get("type", "full")  # full, files, processes, connections
+        
+        try:
+            if FILE_MONITOR_AVAILABLE and self.file_monitor:
+                # Real monitoring
+                log.debug(f"Running {monitor_type} monitoring scan")
+                result = self.file_monitor.monitor()
+                
+                monitor_data = result.to_dict()
+                
+                # Filter based on requested type
+                if monitor_type == "files":
+                    monitor_data = {"file_changes": monitor_data["file_changes"]}
+                elif monitor_type == "processes":
+                    monitor_data = {
+                        "new_processes": monitor_data["new_processes"],
+                        "suspicious_processes": monitor_data["suspicious_processes"],
+                    }
+                elif monitor_type == "connections":
+                    monitor_data = {"new_connections": monitor_data["new_connections"]}
+                
+                log.info(f"Monitor result: {result.total_changes} changes detected, "
+                        f"{len(result.suspicious_processes)} suspicious processes")
+                
+                # Store monitoring result
+                mission.data["monitor_result"] = monitor_data
+                mission.data["status"] = "completed"
+                mission.data["changes_detected"] = result.changes_detected
+                
+                # Deduct economic cost
+                self._deduct_monitor_cost(result.total_changes)
+                
+                return monitor_data
+            else:
+                # Fallback to simulation
+                log.warning("FileMonitor unavailable, using fallback simulation")
+                return self._fallback_monitor_simulation()
+        
+        except Exception as e:
+            log.error(f"Monitor mission failed: {e}")
+            mission.data["status"] = "failed"
+            mission.data["error"] = str(e)
+            return {"status": "failed", "error": str(e)}
+    
+    def _fallback_monitor_simulation(self) -> Dict:
+        """Fallback simulation when FileMonitor unavailable."""
+        return {
+            "status": "simulated",
+            "changes_detected": True,
+            "modified_files": ["/etc/passwd", "/etc/shadow"],
+            "new_processes": [{"pid": 12345, "name": "apache2", "ppid": 1}],
+            "suspicious_processes": [],
+            "new_connections": [{"src": "192.168.1.10", "dst": "10.0.0.5", "port": 443}],
+        }
+    
+    def _deduct_monitor_cost(self, change_count: int) -> None:
+        """Deduct economic cost for monitoring."""
+        # Base cost: 20 units
+        # Additional: 5 units per change detected
+        cost = 20 + (change_count * 5)
+        vault = getattr(getattr(self.kernel, "economic", None), "vault", None)
+        if vault:
+            try:
+                vault.deduct_balance(self.codename, cost, "monitor_changes_cost")
+                log.debug(f"Deducted {cost} units for monitoring")
+            except Exception as e:
+                log.warning(f"Failed to deduct cost: {e}")
 
     def _apply_patch(self, mission: Mission):
-        log.debug("Patch stub executed for mission %s", mission.mission_id)
-        time.sleep(2)
+        """Real safe patching with backup/rollback capability."""
+        log.info("Apply patch mission %s: Executing real patching", mission.mission_id)
+        
+        patch_id = mission.parameters.get("patch_id")
+        service = mission.parameters.get("service")
+        target_version = mission.parameters.get("target_version")
+        new_version = mission.parameters.get("new_version")
+        cves_fixed = mission.parameters.get("cves_fixed", [])
+        dry_run = mission.parameters.get("dry_run", True)  # Default to dry run for safety
+        
+        if not all([patch_id, service, target_version, new_version]):
+            log.error("Patch failed: Missing required parameters")
+            return {"status": "failed", "error": "Missing required patch parameters"}
+        
+        try:
+            if PATCH_MANAGER_AVAILABLE and self.patch_manager:
+                # Create patch info
+                patch = PatchInfo2(
+                    patch_id=patch_id,
+                    name=f"{service}-{new_version}",
+                    description=f"Security patch for {service}",
+                    target_service=service,
+                    target_version=target_version,
+                    new_version=new_version,
+                    cves_fixed=cves_fixed,
+                    changes={},
+                    requires_restart=True,
+                )
+                
+                # Apply patch
+                log.debug(f"Applying patch {patch_id} to {service} (dry_run={dry_run})")
+                result = self.patch_manager.apply_patch(
+                    patch=patch,
+                    dry_run=dry_run,
+                    backup_only=False
+                )
+                
+                patch_data = result.to_dict()
+                
+                log.info(f"Patch result: {result.status}, CVEs fixed: {len(result.applied_changes)}")
+                
+                # Store patch result
+                mission.data["patch_result"] = patch_data
+                mission.data["status"] = result.status
+                mission.data["rollback_available"] = result.rollback_available
+                
+                # Deduct economic cost
+                self._deduct_patch_cost(len(cves_fixed), len(result.errors))
+                
+                return patch_data
+            else:
+                # Fallback to simulation
+                log.warning("PatchManager unavailable, using fallback simulation")
+                return self._fallback_patch_simulation(patch_id, service, new_version)
+        
+        except Exception as e:
+            log.error(f"Patch mission failed: {e}")
+            mission.data["status"] = "failed"
+            mission.data["error"] = str(e)
+            return {"status": "failed", "error": str(e)}
+    
+    def _fallback_patch_simulation(self, patch_id: str, service: str, version: str) -> Dict:
+        """Fallback simulation when PatchManager unavailable."""
+        return {
+            "patch_id": patch_id,
+            "status": "simulated",
+            "service": service,
+            "new_version": version,
+            "files_modified": [f"/etc/{service}/config.conf"],
+            "services_restarted": [service],
+            "rollback_available": True,
+        }
+    
+    def _deduct_patch_cost(self, cves_fixed: int, error_count: int) -> None:
+        """Deduct economic cost for patching."""
+        # Base cost: 100 units
+        # Reward: 50 units per CVE fixed
+        # Penalty: 20 units per error
+        cost = 100 + (error_count * 20) - (cves_fixed * 50)
+        vault = getattr(getattr(self.kernel, "economic", None), "vault", None)
+        if vault:
+            try:
+                vault.deduct_balance(self.codename, max(0, cost), "patch_cost")
+                log.debug(f"Applied {cves_fixed} patches (cost: {cost} units)")
+            except Exception as e:
+                log.warning(f"Failed to deduct cost: {e}")
 
     def _unknown_task(self, mission: Mission):
-        log.error("Unknown task: %s", mission)
+        log.error("Unknown task: %s", mission.name)
+        mission.data["status"] = "failed"
+        mission.data["error"] = f"Unknown task type: {mission.name}"
 
     # ------------------------------------------------------------------
     def shutdown(self):
         """Clean shutdown."""
         self.running = False
         self.executor.shutdown(wait=True)
+        
+        # Clean up Phase 2.4 executors
+        if self.file_monitor:
+            log.debug("File monitor stopped")
+        if self.patch_manager:
+            log.debug("Patch manager stopped")
+        
         log.info("Mission agent shut down.")
+    
+    # --- Phase 2.5: Mission Approval Helper Methods ---
+    def _get_enforcer(self) -> Optional[Any]:
+        """Get the EnforcerAgent from the kernel."""
+        try:
+            agents = getattr(self.kernel, "agents", {})
+            if isinstance(agents, dict):
+                enforcer = agents.get("ENF-ENFORCER") or agents.get("ENF")
+            else:
+                # If agents is a list or other container
+                enforcer = None
+                for agent in getattr(agents, "__iter__", []):
+                    if hasattr(agent, "codename") and agent.codename == "ENF-ENFORCER":
+                        enforcer = agent
+                        break
+            return enforcer
+        except Exception as e:
+            log.debug(f"Could not get enforcer: {e}")
+            return None
+    
+    def _check_mission_approval(self, enforcer: Any, mission: Mission) -> Dict[str, Any]:
+        """
+        Check if mission is approved by the enforcer.
+        
+        Returns:
+            Dict with "approved" boolean and optional "reason" string
+        """
+        try:
+            # Extract mission parameters
+            mission_id = mission.mission_id
+            mission_name = mission.name
+            agent_id = self.codename
+            params = mission.parameters or {}
+            
+            # Call enforcer's evaluation (synchronous wrapper)
+            if hasattr(enforcer, "mission_approval_engine") and enforcer.mission_approval_engine:
+                approval_decision = enforcer.mission_approval_engine.evaluate_mission(
+                    mission_id=mission_id,
+                    mission_name=mission_name,
+                    agent_id=agent_id,
+                    mission_parameters=params,
+                )
+                
+                # Check approval status
+                from laws.mission_approval import ApprovalStatus
+                
+                is_approved = approval_decision.status in [
+                    ApprovalStatus.APPROVED,
+                ]  # Exclude CONDITIONAL_APPROVAL for now
+                
+                reason = approval_decision.justification if not is_approved else None
+                
+                return {
+                    "approved": is_approved,
+                    "reason": reason,
+                    "status": approval_decision.status.value,
+                }
+            
+            # Fallback: approve if enforcer not fully configured
+            return {"approved": True, "reason": "Approval engine not available"}
+        
+        except Exception as e:
+            log.warning(f"Mission approval check failed: {e}, allowing mission")
+            return {"approved": True, "reason": f"Approval check error (fallback): {str(e)}"}
+    
+    # --- Phase 2.4 Utility Methods ---
+    def get_mission_status(self) -> Dict:
+        """Get current mission executor status."""
+        return {
+            "mission_executor": "available" if MISSION_EXECUTOR_AVAILABLE else "unavailable",
+            "file_monitor": "available" if FILE_MONITOR_AVAILABLE else "unavailable",
+            "patch_manager": "available" if PATCH_MANAGER_AVAILABLE else "unavailable",
+            "workers": self.workers,
+            "retry_limit": self.retry_limit,
+        }
+    
+    def get_patch_history(self) -> List[Dict]:
+        """Get history of applied patches."""
+        if self.patch_manager:
+            return self.patch_manager.get_patch_history()
+        return []

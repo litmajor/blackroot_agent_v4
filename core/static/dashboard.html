@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Blackroot C2 Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #181c20; color: #e0e0e0; margin: 0; padding: 0; }
+        .container { max-width: 1200px; margin: 40px auto; background: #23272b; border-radius: 8px; box-shadow: 0 2px 8px #0008; padding: 32px; }
+        h1 { color: #7fffd4; }
+        h2 { color: #5ee6c1; margin-top: 2em; }
+        .section { margin-bottom: 2em; }
+        .metrics, .agents, .wallets, .logs, .controls { background: #181c20; padding: 16px; border-radius: 6px; margin-bottom: 1em; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+        th, td { padding: 8px 12px; border-bottom: 1px solid #333; }
+        th { background: #23272b; color: #7fffd4; }
+        tr:last-child td { border-bottom: none; }
+        .success { color: #7fffd4; }
+        .error { color: #ff6b6b; }
+        button { margin-top: 1em; padding: 10px 24px; background: #7fffd4; color: #181c20; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        button:hover { background: #5ee6c1; }
+        .flex { display: flex; gap: 2em; flex-wrap: wrap; }
+        .flex > div { flex: 1 1 350px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="section project-info" id="projectInfo">
+        <h2>Project Info</h2>
+        <div><b>Name:</b> Blackroot Agent Platform</div>
+        <div><b>Version:</b> v4</div>
+        <div><b>Docs:</b> <a href="/docs" style="color:#7fffd4;">API Docs</a></div>
+        <div><b>Git:</b> <a href="https://github.com/litmajor/blackroot_agent_v4" style="color:#7fffd4;">Repository</a></div>
+    </div>
+    <h1>Blackroot C2 Dashboard</h1>
+    <div class="section notifications" id="notifications" style="display:none;"></div>
+    <div class="section metrics" id="metrics">
+    <em>Loading system metrics...</em>
+    <div id="systemHealth" style="margin-top:1em;"></div>
+    </div>
+    <div class="flex">
+        <div class="section agents" id="agents">
+            <h2>Agents <span id="agentCount" style="font-size:0.7em;color:#5ee6c1;"></span></h2>
+            <input type="text" id="agentSearch" placeholder="Search agents..." style="width:100%;margin-bottom:8px;padding:8px;background:#23272b;color:#e0e0e0;border:1px solid #444;border-radius:4px;">
+            <div id="agentActions" style="margin-bottom:8px;">
+                <button onclick="suspendSelectedAgent()">Suspend</button>
+                <button onclick="rewardSelectedAgent()">Reward</button>
+                <button onclick="penalizeSelectedAgent()">Penalize</button>
+            </div>
+            <em>Loading agent data...</em>
+        </div>
+        <div class="section wallets" id="wallets">
+            <h2>Wallets</h2>
+            <em>Loading wallet data...</em>
+        </div>
+    </div>
+    <div class="flex">
+        <div class="section layers" id="layers">
+            <h2>System Layers</h2>
+            <em>Loading layer data...</em>
+        </div>
+        <div class="section blackvault" id="blackvault">
+            <h2>BlackVault</h2>
+            <div id="vaultBrowser" style="margin-bottom:8px;"></div>
+            <em>Loading BlackVault status...</em>
+        </div>
+    </div>
+    <div class="flex">
+        <div class="section memory" id="memory">
+            <h2>Memory/Core</h2>
+            <em>Loading memory/core status...</em>
+        </div>
+        <div class="section kernel" id="kernel">
+            <h2>Kernel</h2>
+            <em>Loading kernel status...</em>
+        </div>
+    </div>
+    <div class="flex">
+        <div class="section economic" id="economic">
+            <h2>Economic Layer</h2>
+            <canvas id="economicChart" width="400" height="120" style="background:#23272b;border-radius:4px;margin-bottom:8px;"></canvas>
+            <em>Loading economic layer status...</em>
+        </div>
+        <div class="section stealth" id="stealth">
+            <h2>Stealth Layer</h2>
+            <button onclick="activateStealth()">Activate Stealth</button>
+            <button onclick="deactivateStealth()">Deactivate Stealth</button>
+            <em>Loading stealth layer status...</em>
+        </div>
+        <div class="section ghost" id="ghost">
+            <h2>Ghost Layer</h2>
+            <button onclick="runGhostOp()">Run Ghost Op</button>
+            <em>Loading ghost layer status...</em>
+        </div>
+    </div>
+    <div class="section logs" id="logs">
+    <h2>Recent Logs <button onclick="clearLogs()" style="float:right;background:#23272b;color:#7fffd4;">Clear</button></h2>
+        <em>Loading logs...</em>
+    </div>
+    <div class="section controls" id="controls">
+    <h2>System Controls <span style="float:right"><button onclick="toggleTheme()" style="background:#23272b;color:#7fffd4;">Toggle Theme</button></span></h2>
+    <button onclick="refreshAll()">Refresh All</button>
+    <button onclick="triggerFailsafe()">Activate Failsafe</button>
+    <button onclick="quickRestart()">Quick Restart</button>
+    <button onclick="openDocs()">Docs</button>
+    <span id="controlMsg"></span>
+    <div class="section meshmap" id="meshMap">
+        <h2>Mesh Map</h2>
+        <canvas id="meshCanvas" width="600" height="200" style="background:#23272b;border-radius:4px;"></canvas>
+        <em>Loading mesh topology...</em>
+    </div>
+    <div class="section activity-timeline" id="activityTimeline">
+        <h2>Agent Activity Timeline</h2>
+        <canvas id="activityChart" width="600" height="120" style="background:#23272b;border-radius:4px;"></canvas>
+        <em>Loading activity timeline...</em>
+    </div>
+    </div>
+</div>
+<script>
+// --- Theme Toggle ---
+function toggleTheme() {
+    const b = document.body;
+    if (b.style.background === "#181c20") {
+        b.style.background = "#f4f4f4";
+        b.style.color = "#23272b";
+    } else {
+        b.style.background = "#181c20";
+        b.style.color = "#e0e0e0";
+    }
+}
+function openDocs() {
+    window.open('/docs','_blank');
+}
+function quickRestart() {
+    fetch('/c2/restart', {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Restarted'));
+}
+function clearLogs() {
+    fetch('/c2/logs/clear', {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Logs cleared'));
+}
+// --- Notification System ---
+function notify(msg, type="info") {
+    const n = document.getElementById('notifications');
+    n.innerHTML = `<div class="${type}">${msg}</div>`;
+    n.style.display = 'block';
+    setTimeout(()=>{n.style.display='none';}, 4000);
+}
+function fetchMetrics() {
+    fetch('/c2/metrics')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>System Metrics</b><br>`;
+            for (const [k, v] of Object.entries(data)) {
+                html += `<b>${k}:</b> ${v}<br>`;
+            }
+            document.getElementById('metrics').innerHTML = html;
+            // System health widget
+            let health = `<b>Health:</b> <span style='color:${data.health=="OK"?"#7fffd4":"#ff6b6b"}'>${data.health||"Unknown"}</span>`;
+            document.getElementById('systemHealth').innerHTML = health;
+        })
+        .catch(() => {
+            document.getElementById('metrics').innerHTML = '<span class="error">Failed to load metrics.</span>';
+        });
+}
+function fetchAgents() {
+    fetch('/c2/agents')
+        .then(r => r.json())
+        .then(data => {
+            window._allAgents = data;
+            renderAgentTable(data);
+            document.getElementById('agentCount').textContent = `(${data.length})`;
+        })
+        .catch(() => {
+            document.getElementById('agents').innerHTML = '<span class="error">Failed to load agents.</span>';
+        });
+// --- Mesh Map Widget ---
+function fetchMeshMap() {
+    fetch('/c2/mesh')
+        .then(r=>r.json())
+        .then(data=>drawMeshMap(data))
+        .catch(()=>{
+            document.getElementById('meshMap').innerHTML += '<span class="error">Failed to load mesh map.</span>';
+        });
+}
+function drawMeshMap(data) {
+    const ctx = document.getElementById('meshCanvas').getContext('2d');
+    ctx.clearRect(0,0,600,200);
+    if (!data.nodes) return;
+    // Draw nodes
+    data.nodes.forEach((n,i)=>{
+        ctx.beginPath();
+        ctx.arc(80+i*60,100,20,0,2*Math.PI);
+        ctx.fillStyle = n.status=="active"?"#7fffd4":"#ff6b6b";
+        ctx.fill();
+        ctx.strokeStyle="#23272b";
+        ctx.stroke();
+        ctx.fillStyle="#23272b";
+        ctx.fillText(n.id,70+i*60,105);
+    });
+    // Draw links
+    data.links.forEach(l=>{
+        ctx.beginPath();
+        ctx.moveTo(80+l.from*60,100);
+        ctx.lineTo(80+l.to*60,100);
+        ctx.strokeStyle="#5ee6c1";
+        ctx.stroke();
+    });
+}
+// --- Activity Timeline Widget ---
+function fetchActivityTimeline() {
+    fetch('/c2/activity')
+        .then(r=>r.json())
+        .then(data=>drawActivityTimeline(data))
+        .catch(()=>{
+            document.getElementById('activityTimeline').innerHTML += '<span class="error">Failed to load activity timeline.</span>';
+        });
+}
+function drawActivityTimeline(data) {
+    const ctx = document.getElementById('activityChart').getContext('2d');
+    if (!window._activityChart) {
+        window._activityChart = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: [], datasets: [{label:'Events',data:[],backgroundColor:'#7fffd4'}] },
+            options: { responsive:true, plugins:{legend:{labels:{color:'#e0e0e0'}}}, scales:{x:{ticks:{color:'#e0e0e0'}},y:{ticks:{color:'#e0e0e0'}}} }
+        });
+    }
+    window._activityChart.data.labels = data.labels;
+    window._activityChart.data.datasets[0].data = data.values;
+    window._activityChart.update();
+}
+
+function renderAgentTable(data) {
+    let html = `<table id="agentTable"><tr><th></th><th>Agent</th><th>Status</th><th>Role</th><th>Balance</th></tr>`;
+    for (const agent of data) {
+        html += `<tr><td><input type='radio' name='agentSelect' value='${agent.name}'></td><td>${agent.name}</td><td>${agent.status}</td><td>${agent.role}</td><td>${agent.balance}</td></tr>`;
+    }
+    html += `</table>`;
+    document.getElementById('agents').innerHTML = document.getElementById('agents').innerHTML.replace(/<em>.*<\/em>/,"") + html;
+}
+document.getElementById('agentSearch').oninput = function() {
+    const q = this.value.toLowerCase();
+    const filtered = window._allAgents.filter(a => a.name.toLowerCase().includes(q) || a.role.toLowerCase().includes(q));
+    renderAgentTable(filtered);
+};
+function getSelectedAgent() {
+    const radios = document.getElementsByName('agentSelect');
+    for (const r of radios) if (r.checked) return r.value;
+    return null;
+}
+function suspendSelectedAgent() {
+    const agent = getSelectedAgent();
+    if (!agent) return notify('Select an agent first','error');
+    fetch(`/c2/agent/${agent}/suspend`, {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Suspended'));
+}
+function rewardSelectedAgent() {
+    const agent = getSelectedAgent();
+    if (!agent) return notify('Select an agent first','error');
+    fetch(`/c2/agent/${agent}/reward`, {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Rewarded'));
+}
+function penalizeSelectedAgent() {
+    const agent = getSelectedAgent();
+    if (!agent) return notify('Select an agent first','error');
+    fetch(`/c2/agent/${agent}/penalize`, {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Penalized'));
+}
+}
+function fetchWallets() {
+    fetch('/c2/wallets')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<table><tr><th>Wallet</th><th>Owner</th><th>Balance</th><th>Allocated</th><th>Spent</th></tr>`;
+            for (const w of data) {
+                html += `<tr><td>${w.wallet_id}</td><td>${w.owner}</td><td>${w.balance}</td><td>${w.allocated}</td><td>${w.spent}</td></tr>`;
+            }
+            html += `</table>`;
+            document.getElementById('wallets').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('wallets').innerHTML = '<span class="error">Failed to load wallets.</span>';
+        });
+}
+function fetchLogs() {
+    fetch('/c2/logs')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<ul>`;
+            for (const log of data) {
+                html += `<li>${log.timestamp}: ${log.message}</li>`;
+            }
+            html += `</ul>`;
+            document.getElementById('logs').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('logs').innerHTML = '<span class="error">Failed to load logs.</span>';
+        });
+}
+function fetchLayers() {
+    fetch('/c2/layers')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<table><tr><th>Layer</th><th>Status</th><th>Details</th></tr>`;
+            for (const l of data) {
+                html += `<tr><td>${l.name}</td><td>${l.status}</td><td>${l.details}</td></tr>`;
+            }
+            html += `</table>`;
+            document.getElementById('layers').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('layers').innerHTML = '<span class="error">Failed to load layers.</span>';
+        });
+}
+function fetchBlackVault() {
+    fetch('/c2/blackvault')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Status:</b> ${data.status}<br><b>Vault Size:</b> ${data.size}<br><b>Keys:</b> ${data.keys}<br>`;
+            if (data.last_access) html += `<b>Last Access:</b> ${data.last_access}<br>`;
+            if (data.files && data.files.length) {
+                html += `<b>Files:</b><ul>`;
+                for (const f of data.files) {
+                    html += `<li>${f.name} (${f.size}) <button onclick=\"downloadVaultFile('${f.name}')\">Download</button></li>`;
+                }
+                html += `</ul>`;
+            }
+            document.getElementById('blackvault').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('blackvault').innerHTML = '<span class="error">Failed to load BlackVault status.</span>';
+        });
+function downloadVaultFile(name) {
+    window.open(`/c2/blackvault/file/${name}`,'_blank');
+}
+}
+function fetchMemory() {
+    fetch('/c2/memory')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Memory Usage:</b> ${data.usage}<br><b>Objects:</b> ${data.objects}<br><b>Cache:</b> ${data.cache}<br>`;
+            document.getElementById('memory').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('memory').innerHTML = '<span class="error">Failed to load memory/core status.</span>';
+        });
+}
+function fetchKernel() {
+    fetch('/c2/kernel')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Kernel Status:</b> ${data.status}<br><b>Version:</b> ${data.version}<br><b>Uptime:</b> ${data.uptime}<br>`;
+            document.getElementById('kernel').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('kernel').innerHTML = '<span class="error">Failed to load kernel status.</span>';
+        });
+}
+function fetchEconomic() {
+    fetch('/c2/economic')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Treasury:</b> ${data.treasury}<br><b>Burned:</b> ${data.burned}<br><b>Active Agents:</b> ${data.active_agents}<br><b>Utilization:</b> ${data.utilization}<br>`;
+            document.getElementById('economic').innerHTML = html;
+            if (window.Chart) {
+                updateEconomicChart(data.history||[]);
+            }
+        })
+        .catch(() => {
+            document.getElementById('economic').innerHTML = '<span class="error">Failed to load economic layer status.</span>';
+        });
+// Economic chart rendering
+function updateEconomicChart(history) {
+    const ctx = document.getElementById('economicChart').getContext('2d');
+    if (!window._econChart) {
+        window._econChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [{label:'Treasury',data:[],borderColor:'#7fffd4',fill:false},{label:'Burned',data:[],borderColor:'#ff6b6b',fill:false}] },
+            options: { responsive:true, plugins:{legend:{labels:{color:'#e0e0e0'}}}, scales:{x:{ticks:{color:'#e0e0e0'}},y:{ticks:{color:'#e0e0e0'}}} }
+        });
+    }
+    const labels = history.map(h=>h.time);
+    const treasury = history.map(h=>h.treasury);
+    const burned = history.map(h=>h.burned);
+    window._econChart.data.labels = labels;
+    window._econChart.data.datasets[0].data = treasury;
+    window._econChart.data.datasets[1].data = burned;
+    window._econChart.update();
+}
+// Chart.js loader
+if (!window.Chart) {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/chart.js';
+    s.onload = ()=>{ fetchEconomic(); };
+    document.head.appendChild(s);
+}
+}
+function fetchStealth() {
+    fetch('/c2/stealth')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Status:</b> ${data.status}<br><b>Active Techniques:</b> ${data.techniques}<br>`;
+            document.getElementById('stealth').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('stealth').innerHTML = '<span class="error">Failed to load stealth layer status.</span>';
+        });
+function activateStealth() {
+    fetch('/c2/stealth/activate', {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Stealth activated'));
+}
+function deactivateStealth() {
+    fetch('/c2/stealth/deactivate', {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Stealth deactivated'));
+}
+}
+function fetchGhost() {
+    fetch('/c2/ghost')
+        .then(r => r.json())
+        .then(data => {
+            let html = `<b>Status:</b> ${data.status}<br><b>Last Operation:</b> ${data.last_op}<br>`;
+            document.getElementById('ghost').innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('ghost').innerHTML = '<span class="error">Failed to load ghost layer status.</span>';
+        });
+function runGhostOp() {
+    fetch('/c2/ghost/run', {method:'POST'})
+        .then(r=>r.json()).then(d=>notify(d.message||'Ghost op started'));
+}
+}
+function refreshAll() {
+    fetchMetrics();
+    fetchAgents();
+    fetchWallets();
+    fetchLayers();
+    fetchBlackVault();
+    fetchMemory();
+    fetchKernel();
+    fetchEconomic();
+    fetchStealth();
+    fetchGhost();
+    fetchLogs();
+    fetchMeshMap();
+    fetchActivityTimeline();
+    document.getElementById('controlMsg').textContent = 'Refreshed.';
+    setTimeout(()=>{document.getElementById('controlMsg').textContent='';}, 2000);
+}
+function triggerFailsafe() {
+    fetch('/c2/failsafe', {method: 'POST'})
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('controlMsg').textContent = data.message || 'Failsafe triggered.';
+        })
+        .catch(() => {
+            document.getElementById('controlMsg').textContent = 'Failed to trigger failsafe.';
+        });
+}
+refreshAll();
+setInterval(refreshAll, 15000);
+</script>
+</body>
+</html>

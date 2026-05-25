@@ -16,10 +16,11 @@ from typing import Optional, List, Dict
 import dnstwist
 from Crypto.Random import get_random_bytes
 from fastapi import FastAPI
-from redis import Redis
 
 from .resilience import CircuitBreaker, ChecksumCache, make_canary
 from swarm_mesh import SwarmMesh
+from core.redis_client import get_redis_client
+from core.redis_config import RedisDB
 
 
 # Setup logging
@@ -41,19 +42,19 @@ PROXY_POOL = [
 class ReconModule:
     """Performs advanced web reconnaissance with BlackVault and SwarmMesh integration."""
 
-    def __init__(self, vault, swarm: 'SwarmMesh', redis: Redis, logger: Optional[logging.Logger] = None):
+    def __init__(self, vault, swarm: 'SwarmMesh', redis=None, logger: Optional[logging.Logger] = None):
         """
         Initializes the recon module with BlackVault and SwarmMesh.
         
         Args:
             vault: BlackVault instance for storing results.
             swarm: SwarmMesh instance for command distribution.
-            redis: Redis instance for Pub/Sub.
+            redis: Optional Redis instance (for backward compatibility; uses factory if None).
             logger: Optional custom logger (defaults to 'ReconModule').
         """
         self.vault = vault
         self.swarm = swarm
-        self.redis = redis
+        self.redis = redis or get_redis_client(RedisDB.THREAT_INTEL)
         self.logger = logger or logging.getLogger('ReconModule')
         self.lock = threading.Lock()
         self.session = requests.Session()

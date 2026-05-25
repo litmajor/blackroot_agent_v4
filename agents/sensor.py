@@ -1,7 +1,13 @@
-import time, psutil, logging, json
+import time, psutil, logging, json, sys
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from agents.base import BaseAgent
+try:
+    from .base import BaseAgent
+except ImportError:
+    # Add parent directory to path for direct script execution
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from agents.base import BaseAgent
 # --- Use core agent anatomy types ---
 from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
@@ -9,6 +15,8 @@ log = logging.getLogger("SENS-DAEMON")
 
 
 class SensorAgent(BaseAgent):
+    def should_activate(self, config):
+        return self.codename in config.get("agent_whitelist", [])
     def __init__(self, cfg: Optional[dict] = None, agent_id: AgentID = AgentID(value="SENS-DAEMON")):
         self.agent_id: AgentID = agent_id
         super().__init__(str(self.agent_id))
@@ -17,21 +25,55 @@ class SensorAgent(BaseAgent):
         self.jitter = cfg.get("jitter", 0.2)          # ±20 % for stealth
         self.log_every = cfg.get("log_every", 60)     # seconds
         self.last_log = datetime.utcnow()
+        # Economic Layer: Wallet registration
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+            self.accountant.register_agent(str(self.agent_id), Decimal('75'))  # Initial budget
+        except Exception as e:
+            self.accountant = None
+            log.error(f"Failed to initialize accountant for SensorAgent: {e}")
+
+    def _deduct_sensor_cost(self):
+        """Deduct Root for sensing operation (0.2 Root per sample)."""
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.process_agent_spend(str(self.agent_id), Decimal('0.2'), "Sensor sample cost")
+
+    def _reward_sensor_success(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.agent_id)].balance += Decimal('0.4')
+            self.accountant.treasury_balance -= Decimal('0.4')
+            log.info(f"Rewarded 0.4 Root to SensorAgent for successful sensing.")
+
+    def _burn_on_sensor_failure(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('0.3')
+            self.accountant.agent_wallets[str(self.agent_id)].balance -= penalty
+            log.info(f"Burned 0.3 Root from SensorAgent for failed sensing.")
 
     # ------------------------------------------------------------------
     def run(self, mission: Mission = Mission(name="default", objectives=[], parameters={})):
         super().run()
         log.info("System sensing started (interval %ss, jitter %s)", self.interval, self.jitter)
         while True:
-            if getattr(self, "priority", None) == "low":
-                log.debug("Low priority → sleeping")
-                time.sleep(self.interval)
-                continue
-
-            data = self._sample()
-            self._dispatch(data)
-            self._emit_event(Event(event_type="sensor_sample", payload=data, sender_id=self.agent_id))
-            self._maybe_log(data)
+            self._deduct_sensor_cost()
+            try:
+                if getattr(self, "priority", None) == "low":
+                    log.debug("Low priority → sleeping")
+                    time.sleep(self.interval)
+                    continue
+                data = self._sample()
+                self._dispatch(data)
+                self._emit_event(Event(event_type="sensor_sample", payload=data, sender_id=str(self.agent_id)))
+                self._maybe_log(data)
+                self._reward_sensor_success()
+            except Exception as e:
+                self._burn_on_sensor_failure()
+                log.warning(f"Sensor cycle failed: {e}")
             time.sleep(self._jittered_sleep())
 
     # ------------------------------------------------------------------
@@ -136,3 +178,6 @@ class SensorAgent(BaseAgent):
         if (now - self.last_log).total_seconds() >= self.log_every:
             log.info("Sensor sample: %s", data)
             self.last_log = now
+            
+if __name__ == "__main__":
+    SensorAgent().run()

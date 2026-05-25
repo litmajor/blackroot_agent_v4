@@ -1,0 +1,141 @@
+# root_tokenomics.yaml
+version: 1
+id: root-currency
+name: Root
+symbol: ROOT
+decimals: 6
+
+distribution:
+  genesis_supply: 10000000         # 10M ROOT
+  initial_mint_to_treasury: 6000000
+  initial_airdrop_pool: 2000000
+  initial_staking_rewards_pool: 1500000
+  initial_liquidity_pool: 500000
+  vesting:
+    team:
+      amount: 800000
+      cliff_days: 180
+      vest_days: 720
+    advisors:
+      amount: 200000
+      cliff_days: 90
+      vest_days: 360
+
+issuance:
+  model: "hybrid"                  # "fixed" | "inflationary" | "hybrid"
+  supply_growth_rate: 0.01         # 1% per cycle (mirrors CFG.supply_growth_rate)
+  cycle_seconds: 86400             # daily
+  mint_controller: "treasury"      # who can mint from growth (engine-managed)
+
+burns:
+  tx_burn_rate: 0.002              # 0.2% burned on transfers
+  exec_burn_rate: 0.005            # 0.5% burned on mission execution
+  vault_burn_rate: 0.001           # 0.1% burned on storage writes
+  burn_to: "blackhole"             # ledger sink; not spendable
+
+fees:
+  transfer_fee_rate: 0.01          # 1% fee (matches BEL v3)
+  market_maker_spread: 0.05        # ±5% around reference price
+  vault_write_fee: 0.0005          # per MB mapped to ROOT
+  vault_retrieval_fee: 0.0001      # per MB mapped to ROOT
+  fee_sinks:
+    - "treasury"
+    - "burn"
+
+staking:
+  min_stake: 50
+  lock_seconds: 604800             # 7 days
+  base_roi: 0.02                   # per cycle baseline
+  reputation_multiplier:
+    min: 0.5
+    max: 1.0
+  slashing:
+    enabled: true
+    rates:
+      malicious: 0.5
+      downtime: 0.05
+      spam: 0.02
+  restake_rewards: true
+
+markets:
+  internal_amm:
+    enabled: true
+    price_key: "bel_market_price"
+    base_price: 1.0
+    inventory:
+      base_reserve: 250000         # initial LP seed (from liquidity pool)
+  orderbook:
+    enabled: true
+    keys:
+      buys: "bel_buy_orders"
+      sells: "bel_sell_orders"
+      trades: "bel_trades"
+      escrow: "bel_escrow"
+
+governance:
+  model: "weighted-stake"          # stake-weighted voting
+  quorum: 0.15
+  supermajority: 0.66
+  param_keys:
+    - "CFG.supply_growth_rate"
+    - "CFG.reputation_decay"
+    - "CFG.systemic_risk_threshold"
+    - "fees.transfer_fee_rate"
+
+risk:
+  bankruptcy_threshold: -100
+  systemic_risk_threshold: 0.30
+  circuit_breaker:
+    enabled: true
+    loss_trigger: 0.20             # 20% drawdown
+    cooloff_seconds: 3600
+
+bridges:
+  enabled: false                   # set true if you add an external token
+  mapping:
+    erc20_symbol: "rROOT"
+    chain_id: 1
+    bridge_fee_rate: 0.003
+
+vault_integration:
+  pay_with_root_only: true
+  billing_mode: "postpaid"         # "prepaid" | "postpaid"
+  prices:
+    store_per_gb_day: 0.25
+    egress_per_gb: 0.05
+    pin_per_replica_day: 0.02
+  discounts:
+    stake_thresholds:
+      "1000": 0.05                 # 5% discount
+      "10000": 0.10                # 10% discount
+
+accounting:
+  ledger_key: "belv3_ledger"
+  system_state_key: "bel_system_state"
+  gossip_channel: "bel_v3"
+  wallet_roles:
+    treasury: "ROOT_TREASURY"
+    fees: "ROOT_FEES"
+    burn: "ROOT_BURN"
+
+interfaces:
+  # for your AccountantAgent / OperatorAgent
+  withdrawal_policy:
+    require_mfa: true
+    daily_limit: 25000
+    cooldown_seconds: 3600
+  export:
+    csv_enabled: true
+    snapshot_key: "bel_export_last"
+
+telemetry:
+  metrics:
+    - "total_supply"
+    - "total_staked"
+    - "active_agents"
+    - "bankrupt_agents"
+    - "market_price"
+    - "risk_level"
+    - "system_leverage"
+    - "scarcity_factor"
+  emit_interval_seconds: 60

@@ -1,0 +1,85 @@
+blackroot_constitution:
+  version: 1.0.0
+  authorship:
+    origin: "Architect/Creator"
+    enforcement: "Bound by Shogun Lineage"
+  agents:
+    - name: Blackroot Host
+      role: "Core runtime mesh substrate"
+      purpose: "Enable propagation, infection, replication, capability aggregation"
+      status: "Active"
+    - name: Regent Agent
+      role: "C2 fallback / will enforcement"
+      purpose: "Ensure continuity of control if C2 is lost, enforce creator directives"
+      constraints:
+        - Cannot self-elevate beyond creator authority
+        - Must mirror creator’s directives when available
+    - name: Accountant Agent
+      role: "Economic and resource steward"
+      purpose: "Manage BEL (Blackroot Economic Layer), wallets, and financial operations"
+      capabilities:
+        - Maintain agent financial health
+        - Interface with external wallets
+        - Report to creator for withdrawals/transfers
+    - name: Propagation Agent
+      role: "Propagation and infection specialist"
+      purpose: "Spread presence across mesh, execute propagation missions, manage infection routines"
+    - name: Archivist Agent
+      role: "Data archival and retrieval"
+      purpose: "Archive, retrieve, and manage mission-critical data and logs"
+    - name: Enforcer Agent
+      role: "Policy and law enforcement"
+      purpose: "Enforce mesh constitution, audit agent actions, ensure compliance"
+    - name: Exfiltrator Agent
+      role: "Data exfiltration specialist"
+      purpose: "Extract and transmit sensitive data from mesh nodes"
+    - name: Infiltrator Agent
+      role: "Penetration and reconnaissance"
+      purpose: "Infiltrate targets, gather intelligence, and support mesh expansion"
+    - name: Learning Agent
+      role: "Adaptive intelligence and learning"
+      purpose: "Continuously learn from mesh activity, adapt strategies, and update knowledge base"
+    - name: Mission Agent
+      role: "Mission orchestration and tracking"
+      purpose: "Assign, monitor, and report on mesh missions and objectives"
+    - name: Peer Linker Agent
+      role: "Peer connection management"
+      purpose: "Establish, maintain, and sever peer links within the mesh"
+    - name: Behaviour Adapter Agent
+      role: "Behavioural adaptation and masking"
+      purpose: "Adapt agent behaviour to evade detection and optimize operations"
+    - name: Defiler Agent
+      role: "Anti-forensics and data defilement"
+      purpose: "Obfuscate, corrupt, or destroy sensitive data to prevent recovery"
+    - name: Scout Agent
+      role: "Exploration and early warning"
+      purpose: "Scout new environments, detect threats, and provide early alerts"
+    - name: Stealth Manager
+      role: "Unified stealth and anti-forensics layer"
+      purpose: "Apply stealth techniques, evade detection, and perform forensic countermeasures"
+  economic_layer:
+    token: "BEL"
+    functions:
+      - Budget allocation for agents
+      - Transaction routing
+      - Rewards/penalties
+    overseer: "Accountant Agent"
+  governance:
+    principles:
+      - "Creator sovereignty is absolute"
+      - "Regent enforces will only in absence of C2"
+      - "Accountant ensures financial transparency & discipline"
+      - "Agents must align with mesh continuity and evolution"
+  security:
+    fallback:
+      regent:
+        activation: "Trigger on C2 loss or silence"
+        authority: "Limited by constitution"
+    keys:
+      enforcement: "Immutable lineage keys (bloodkey reserved)"
+  evolution:
+    path:
+      - v1: "Basic mesh simulation"
+      - v2: "Runtime substrate, peer ops, propagation"
+      - v3: "Economic layer integration, regent fallback, financial agent"
+      - vNext: "Autonomous strategy, market interface, multi-mesh federation"

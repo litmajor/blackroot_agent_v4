@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from web3 import Web3
 from logging import config
 import uuid
+from dataclasses import field
 import time
 import logging
 import math
@@ -13,12 +14,11 @@ import hashlib
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Tuple
 from enum import Enum
-import redis.asyncio as redis
-from black_vault import BlackVault
+from vault_adapter import UnifiedVault
 from blackvault_client import BlackVaultClient
 
 # Import the enhanced BEL v3 system
-from bel_layer import (
+from economic.bel_layer import (
     Ledger, EconomicV3Mixin, LedgerEntry, SystemState, 
     Market, MarketOrder, RiskManager, EconomicEngine,
     CFG, AgentStatus
@@ -50,7 +50,7 @@ class ChainWallet:
     address: str
     vault_key_id: str  # Reference to BlackVault entry
     balance_native: float = 0.0
-    balance_tokens: Dict[str, float] = {}
+    balance_tokens: Dict[str, float] = field(default_factory=dict)
     nonce: int = 0
     created_at: float = 0.0
     last_sync: float = 0.0
@@ -74,7 +74,7 @@ class TransactionRequest:
     priority: str = "medium"  # low, medium, high
     max_gas: Optional[float] = None
     deadline: Optional[float] = None
-    metadata: Dict[str, Any] = {} 
+    metadata: Dict[str, Any] = field(default_factory=dict)
     status: str = "pending"
     tx_hash: Optional[str] = None
     created_at: float = 0.0
@@ -105,7 +105,9 @@ class WalletManager:
         self.wallets_key = "agent_wallets"
         self.pending_txs_key = "pending_transactions"
         eth_rpc_url = os.getenv("ETH_RPC_URL", "http://localhost:8545")
-        self.blackvault = BlackVault()  # Initialize BlackVault client
+        
+        # Use unified vault adapter (local or distributed mode)
+        self.blackvault = UnifiedVault(mode='local')
         self.blackvault_client = BlackVaultClient()
         self.web3 = Web3(Web3.HTTPProvider(eth_rpc_url))
         # Define available bridge routes

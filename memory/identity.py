@@ -1,6 +1,8 @@
 import json, time, logging
 from typing import Dict, Any, Optional
-from redis import Redis
+
+from core.redis_client import get_redis_client
+from core.redis_config import RedisDB
 
 class IdentityMap:
     """
@@ -10,10 +12,18 @@ class IdentityMap:
     - local in-memory cache for ultra-fast reads
     """
     def __init__(self,
-                 redis: Redis,
+                 redis=None,
                  channel: str = "identity_events",
                  ttl: int = 3600):
-        self.redis   = redis
+        # Use factory if no redis client provided
+        if redis is None:
+            redis_wrapper = get_redis_client(RedisDB.IDENTITY)
+            self.redis = redis_wrapper.redis
+            self.redis_client_wrapper = redis_wrapper
+        else:
+            self.redis = redis
+            self.redis_client_wrapper = None
+        
         self.channel = channel
         self.ttl     = ttl
         self.logger  = logging.getLogger("IdentityMap")

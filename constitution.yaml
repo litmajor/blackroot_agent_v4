@@ -1,0 +1,84 @@
+blackroot_constitution:
+  agents:
+    - constraints: []
+      name: Accountant Agent
+      role: Accountant Agent
+    - constraints:
+      - cannot_self_elevate
+      name: Regent Agent
+      role: Regent Agent
+    - name: Blackroot Host
+      role: "Core runtime mesh substrate"
+      purpose: "Enable propagation, infection, replication, capability aggregation"
+      status: "Active"
+    - name: Regent Agent
+      role: "C2 fallback / will enforcement"
+      purpose: "Ensure continuity of control if C2 is lost, enforce creator directives"
+      constraints:
+        - Cannot self-elevate beyond creator authority
+        - Must mirror creator’s directives when available
+    - name: Accountant Agent
+      role: "Economic and resource steward"
+      purpose: "Manage BEL (Blackroot Economic Layer), wallets, and financial operations"
+      capabilities:
+        - Maintain agent financial health
+        - Interface with external wallets
+        - Report to creator for withdrawals/transfers
+    - name: Propagation Agent
+      role: "Propagation and infection specialist"
+      purpose: "Spread presence across mesh, execute propagation missions, manage infection routines"
+    - name: Archivist Agent
+      role: "Data archival and retrieval"
+      purpose: "Archive, retrieve, and manage mission-critical data and logs"
+    - name: Enforcer Agent
+      role: "Policy and law enforcement"
+      purpose: "Enforce mesh constitution, audit agent actions, ensure compliance"
+    - name: Exfiltrator Agent
+      role: "Data exfiltration specialist"
+      purpose: "Extract and transmit sensitive data from mesh nodes"
+    - name: Infiltrator Agent
+      role: "Penetration and reconnaissance"
+      purpose: "Infiltrate targets, gather intelligence, and support mesh expansion"
+    - name: Learning Agent
+      role: "Adaptive intelligence and learning"
+      purpose: "Continuously learn from mesh activity, adapt strategies, and update knowledge base"
+    - name: Mission Agent
+      role: "Mission orchestration and tracking"
+      purpose: "Assign, monitor, and report on mesh missions and objectives"
+    - name: Peer Linker Agent
+      role: "Peer connection management"
+      purpose: "Establish, maintain, and sever peer links within the mesh"
+    - name: Behaviour Adapter Agent
+      role: "Behavioural adaptation and masking"
+      purpose: "Adapt agent behaviour to evade detection and optimize operations"
+    - name: Defiler Agent
+      role: "Anti-forensics and data defilement"
+      purpose: "Obfuscate, corrupt, or destroy sensitive data to prevent recovery"
+    - name: Scout Agent
+      role: "Exploration and early warning"
+      purpose: "Scout new environments, detect threats, and provide early alerts"
+    - name: Stealth Manager
+      role: "Unified stealth and anti-forensics layer"
+      purpose: "Apply stealth techniques, evade detection, and perform forensic countermeasures"
+    - name: Sensor Agent
+      role: "Environmental and system monitoring"
+      purpose: "Monitor system health, detect anomalies, and alert other agents"
+    - name: Loader Agent
+      role: "Module and payload loader"
+      purpose: "Load and validate new modules, integrate external code, manage plugin lifecycle"
+    - name: Reflection Agent
+      role: "Self-analysis and introspection"
+      purpose: "Analyze own behavior, report anomalies, suggest improvements"
+    - name: Repair Agent
+      role: "System repair and recovery"
+      purpose: "Detect and fix system faults, submit repair tickets, coordinate recovery"
+    - name: Replicator Agent
+      role: "Agent replication and backup"
+      purpose: "Create agent backups, restore agents from backup, synchronize state across replicas"
+    - name: Fallman Agent
+      role: "C2 decoy, diversion, and continuity proxy"
+      purpose: "Act as a false C2 endpoint, absorb attacks, mask true command/control layer"
+  policies:
+    heartbeat_seconds: 10
+    min_reputation: 0.2
+  version: 1.0.0

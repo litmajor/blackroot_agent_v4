@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-04-06T16:42:56.553567",
+  "confidence_engine_state": {
+    "successful_techniques": [
+      "lsa_dump",
+      "browser_dump",
+      "dns_tunnel",
+      "scheduled_stealth",
+      "cloud_upload",
+      "phishing",
+      "supply_chain",
+      "phishing",
+      "lsa_dump",
+      "browser_dump",
+      "dns_tunnel",
+      "scheduled_stealth",
+      "cloud_upload",
+      "phishing",
+      "supply_chain",
+      "phishing",
+      "lsa_dump",
+      "browser_dump",
+      "dns_tunnel",
+      "scheduled_stealth",
+      "cloud_upload",
+      "phishing",
+      "supply_chain",
+      "phishing",
+      "lsa_dump",
+      "browser_dump",
+      "dns_tunnel",
+      "scheduled_stealth",
+      "cloud_upload",
+      "phishing",
+      "supply_chain",
+      "phishing",
+      "lsa_dump",
+      "browser_dump",
+      "dns_tunnel",
+      "scheduled_stealth",
+      "cloud_upload",
+      "phishing",
+      "supply_chain",
+      "phishing",
+      "lsa_dump",
+      "browser_dump",
+      "dns_tunnel",
+      "scheduled_stealth",
+      "cloud_upload",
+      "phishing",
+      "registry_run",
+      "uac_bypass",
+      "psexec",
+      "bulk_https"
+    ],
+    "failed_techniques": [],
+    "success_rate_by_technique": {
+      "registry_run": 1.0,
+      "bulk_https": 1.0,
+      "lsa_dump": 1.0,
+      "browser_dump": 1.0,
+      "supply_chain": 1.0,
+      "scheduled_stealth": 1.0,
+      "psexec": 1.0,
+      "uac_bypass": 1.0,
+      "cloud_upload": 1.0,
+      "phishing": 1.0,
+      "dns_tunnel": 1.0
+    }
+  },
+  "causal_graph_weights": {
+    "infiltration": {
+      "causes": [],
+      "effects": [],
+      "edge_count": 7
+    },
+    "persistence": {
+      "causes": [],
+      "effects": [],
+      "edge_count": 3
+    },
+    "privilege_escalation": {
+      "causes": [],
+      "effects": [],
+      "edge_count": 5
+    },
+    "lateral_movement": {
+      "causes": [],
+      "effects": [],
+      "edge_count": 8
+    },
+    "data_exfiltration": {
+      "causes": [],
+      "effects": [],
+      "edge_count": 8
+    },
+    "c2_communication": {
+      "causes": [],
+      "effects": [],
+      "edge_count": 4
+    }
+  },
+  "world_state": {
+    "current_phase": "data_exfiltration",
+    "edr_detected": false,
+    "uncertainty": 0.1,
+    "machines_compromised": 1,
+    "privilege_level": "user"
+  }
+}

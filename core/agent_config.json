@@ -1,0 +1,116 @@
+{
+  "agents": {
+    "archivist": {
+      "agent_id": "ARCHIVIST-001",
+      "codename": "BR-ARCHIVIST",
+      "secret_key": "dev_secret",
+      "governance_key": "dev_gov",
+      "db_path": "blackroot_archive.db"
+    },
+    "enforcer": {
+      "agent_id": "ENFORCER-001",
+      "codename": "BR-ENFORCER",
+      "enforcement_engine": "default_engine",
+      "economic_layer": "default_econ",
+      "command_control": "default_cmd",
+      "constitution_reference": "laws/constitution.json"
+    },
+    "scourge": {
+      "agent_id": "FAL-SCOURGE",
+      "system_interface": null
+    },
+    "propagator": {
+      "agent_id": "BR-PROPAGATOR",
+      "codename": "BR-PROPAGATOR"
+    },
+    "infiltrator": {
+      "agent_id": "BR-INFILTRATOR",
+      "codename": "BR-INFILTRATOR"
+    },
+    "overseer": {
+      "agent_id": "BR-OVERSEER",
+      "codename": "BR-OVERSEER"
+    },
+    "accountant": {
+      "agent_id": "BR-ACCOUNTANT",
+      "codename": "BR-ACCOUNTANT"
+    },
+    "fallman": {
+      "agent_id": "BR-FALLMAN",
+      "codename": "BR-FALLMAN"
+    },
+    "defiler": {
+      "agent_id": "BR-DEFILER",
+      "codename": "BR-DEFILER"
+    },
+    "learning": {
+      "agent_id": "BR-LEARNING",
+      "codename": "BR-LEARNING"
+    },
+    "loader": {
+      "agent_id": "BR-LOADER",
+      "codename": "BR-LOADER"
+    },
+    "mission": {
+      "agent_id": "BR-MISSION",
+      "codename": "BR-MISSION"
+    },
+    "peer_linker": {
+      "agent_id": "BR-PEERLINKER",
+      "codename": "BR-PEERLINKER"
+    },
+    "propagation": {
+      "agent_id": "BR-PROPAGATION",
+      "codename": "BR-PROPAGATION"
+    },
+    "reflection": {
+      "agent_id": "BR-REFLECTION",
+      "codename": "BR-REFLECTION"
+    },
+    "repair": {
+      "agent_id": "BR-REPAIR",
+      "codename": "BR-REPAIR"
+    },
+    "replicator": {
+      "agent_id": "BR-REPLICATOR",
+      "codename": "BR-REPLICATOR"
+    },
+    "scout": {
+      "agent_id": "BR-SCOUT",
+      "codename": "BR-SCOUT"
+    },
+    "sensor": {
+      "agent_id": "BR-SENSOR",
+      "codename": "BR-SENSOR"
+    }
+  },
+  "network": {
+    "enable_upnp": false,
+    "enable_stun": false
+  },
+  "shogun": {
+    "enabled": true,
+    "scan_subnets": [
+      "192.168.1.0/24",
+      "10.0.0.0/24"
+    ],
+    "scan_timeout": 300,
+    "max_targets": 100,
+    "aggressive_scan": false,
+    "min_zombie_score": 0.6,
+    "cycle_interval": 3600,
+    "passive_duration": 900,
+    "nmap_args": "-sV -O --script vuln",
+    "honeypot_patterns": [
+      "honeypot",
+      "trap",
+      "virtual",
+      "docker",
+      "honeyd"
+    ]
+  },
+  "vault": {
+    "vault_path": "mirrorcore/",
+    "password": "dev_vault_password"
+  }
+}

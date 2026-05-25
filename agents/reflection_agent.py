@@ -8,21 +8,70 @@ log = logging.getLogger("REFLECT-DELTA")
 
 
 class ReflectionAgent(BaseAgent):
+    def should_activate(self, config):
+        return self.codename in config.get("agent_whitelist", [])
     def __init__(self, cfg: dict | None = None):
         super().__init__("REFLECT-DELTA")
         cfg = cfg or {}
+        self.agent_id = AgentID("REFLECT-DELTA")
+        self.agent_status = AgentStatus.ACTIVE
         self.interval = max(1, cfg.get("interval", 60))
         self.jitter = cfg.get("jitter", 0.1)          # ±10 %
         self.log_every = cfg.get("log_every", 300)    # seconds
         self.last_log = datetime.utcnow()
         self.running = True
+        # Economic Layer: Wallet registration
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+            self.accountant.register_agent(str(self.agent_id), Decimal('85'))  # Initial budget
+        except Exception as e:
+            self.accountant = None
+            log.error(f"Failed to initialize accountant for ReflectionAgent: {e}")
+
+    def _deduct_reflection_cost(self):
+        """Deduct Root for reflection operation (0.3 Root per cycle)."""
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.process_agent_spend(str(self.agent_id), Decimal('0.3'), "Reflection cost")
+
+    def _reward_reflection_success(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.agent_id)].balance += Decimal('0.6')
+            self.accountant.treasury_balance -= Decimal('0.6')
+            log.info(f"Rewarded 0.6 Root to ReflectionAgent for successful reflection.")
+
+    def _burn_on_reflection_failure(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('0.45')
+            self.accountant.agent_wallets[str(self.agent_id)].balance -= penalty
+            log.info(f"Burned 0.45 Root from ReflectionAgent for failed reflection.")
+
+    def get_status(self):
+        return {
+            "agent_id": str(self.agent_id),
+            "status": self.agent_status.value,
+            "interval": self.interval,
+            "jitter": self.jitter,
+            "log_every": self.log_every,
+            "running": self.running
+        }
 
     # ------------------------------------------------------------------
     def run(self):
         super().run()
         log.info("Reflection cycle started (interval %ss, jitter %s)", self.interval, self.jitter)
         while self.running:
-            self._single_cycle()
+            self._deduct_reflection_cost()
+            try:
+                self._single_cycle()
+                self._reward_reflection_success()
+            except Exception as e:
+                self._burn_on_reflection_failure()
+                log.warning(f"Reflection cycle failed: {e}")
             time.sleep(self._jittered_sleep())
 
     # ------------------------------------------------------------------

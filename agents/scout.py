@@ -27,6 +27,33 @@ from typing import Dict, List, Optional, Tuple, Any, Set
 import ipaddress
 import concurrent.futures
 
+# Phase 2.3: Real threat intelligence and ML-based anomaly detection
+try:
+    from recon.threat_intelligence import ThreatIntelligenceLoader, ThreatType, get_threat_loader
+    from ml.anomaly_detection import MLAnomalyDetector, BehavioralFeatures, get_ml_detector
+    THREAT_INTEL_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Threat intelligence modules not available: {e}")
+    THREAT_INTEL_AVAILABLE = False
+    ThreatIntelligenceLoader = None
+    get_threat_loader = None
+    get_ml_detector = None
+
+# Real network scanner integration (Phase 0)
+try:
+    from scout_real_scanner_integration import RealNetworkScanner  # type: ignore
+    REAL_SCANNER_AVAILABLE = True
+    logger = logging.getLogger("Scout")
+    logger.info("[✅] Real network scanner module loaded")
+except ImportError as e:
+    logging.warning(f"Real network scanner not available: {e} - falling back to simulation")
+    REAL_SCANNER_AVAILABLE = False
+    
+    class RealNetworkScanner:  # type: ignore
+        """Dummy class for type checking when module unavailable"""
+        pass
+    RealNetworkScanner = None  # type: ignore
+
 
 # =============================================================================
 # CORE INFRASTRUCTURE & AGENT CLASSIFICATION
@@ -408,8 +435,9 @@ class NodeProfiler:
         return identity_data
     
     def _simulate_service_scan(self, node: str) -> Dict[int, str]:
-        """Simulate realistic service scanning"""
-        # Common service port mappings
+        """Perform service scanning (fallback to realistic simulation)"""
+        # Fallback to realistic simulation
+        logging.debug(f"[*] SIMULATED SCAN: {node}")
         service_possibilities = {
             21: 'ftp',
             22: 'ssh',
@@ -577,41 +605,109 @@ class RiskAssessor:
         self.threat_threshold = threat_threshold
         self.anomaly_detectors = self._initialize_detectors()
         self.threat_database = self._load_threat_intelligence()
+        self.ml_detector = self._initialize_ml_detector()
         self.assessment_cache = {}
 
     def _load_threat_intelligence(self) -> Dict[str, Any]:
-        """Load threat intelligence database (stub implementation)."""
-        # In a real system, this would load from external sources or files.
+        """Load real threat intelligence from ThreatIntelligenceLoader.
+        
+        Phase 2.3 improvement: Replaces stub with real threat data loading.
+        Falls back to empty database if threat_intel modules unavailable.
+        """
+        try:
+            if not THREAT_INTEL_AVAILABLE or get_threat_loader is None:
+                logger.debug("Threat intelligence modules not available; using empty database")
+                return self._get_empty_threat_database()
+            
+            # Get or create threat loader
+            threat_loader = get_threat_loader()
+            
+            # Export all threat data
+            threat_data = threat_loader.export_as_dict()
+            
+            logger.info(f"Loaded threat intelligence: {threat_data['stats']['total_signatures']} signatures, "
+                    f"{threat_data['stats']['total_malicious_ips']} IPs, "
+                    f"{threat_data['stats']['total_cves']} CVEs")
+            
+            return threat_data
+        
+        except Exception as e:
+            logger.error(f"Error loading threat intelligence: {e}")
+            return self._get_empty_threat_database()
+    
+    def _get_empty_threat_database(self) -> Dict[str, Any]:
+        """Fallback empty threat database"""
         return {
             'known_honeypots': [],
             'malicious_ips': [],
             'threat_signatures': [],
-            'recent_incidents': []
+            'recent_incidents': [],
+            'stats': {
+                'total_signatures': 0,
+                'total_malicious_ips': 0,
+                'total_cves': 0
+            },
+            'threat_signatures': {},
+            'malicious_ips': {},
+            'cve_database': {}
         }
+    
+    def _initialize_ml_detector(self) -> Optional['MLAnomalyDetector']:
+        """Initialize ML-based anomaly detector"""
+        try:
+            if not THREAT_INTEL_AVAILABLE or get_ml_detector is None:
+                logger.debug("ML anomaly detector not available")
+                return None
+            
+            detector = get_ml_detector()
+            logger.info(f"Initialized ML anomaly detector (trained: {detector.is_trained}, "
+                    f"samples: {detector.training_samples})")
+            return detector
+        
+        except Exception as e:
+            logger.warning(f"Error initializing ML detector: {e}")
+            return None
         
     def evaluate_node_threat_level(self, node_profile: NodeProfile) -> Dict[str, Any]:
-        """Multi-dimensional threat assessment"""
+        """Multi-dimensional threat assessment with ML-based anomaly detection
+        
+        Phase 2.3 improvement: Integrates ML-based behavioral anomaly detection
+        """
         threat_vectors = {
             'defensive_capabilities': self._assess_active_defenses(node_profile),
             'monitoring_intensity': self._measure_surveillance_level(node_profile),
             'response_aggressiveness': self._evaluate_countermeasure_tendency(node_profile),
             'honeypot_probability': self._calculate_trap_likelihood(node_profile),
-            'attribution_risk': self._assess_forensic_capabilities(node_profile)
+            'attribution_risk': self._assess_forensic_capabilities(node_profile),
+            'ml_anomaly_score': self._detect_behavioral_anomaly(node_profile)  # NEW
         }
         
-        # Calculate weighted threat score
+        # Calculate weighted threat score (updated weights for Phase 2.3)
         weights = {
-            'defensive_capabilities': 0.25,
-            'monitoring_intensity': 0.2,
-            'response_aggressiveness': 0.2,
-            'honeypot_probability': 0.2,
-            'attribution_risk': 0.15
+            'defensive_capabilities': 0.20,
+            'monitoring_intensity': 0.15,
+            'response_aggressiveness': 0.15,
+            'honeypot_probability': 0.20,
+            'attribution_risk': 0.10,
+            'ml_anomaly_score': 0.20  # NEW: 20% weight for ML-based detection
         }
         
         composite_threat = sum(
             threat_vectors[vector] * weights[vector]
             for vector in threat_vectors
+            if vector in weights  # Handle case where ml_anomaly_score is 0 (no detector)
         )
+        
+        # Normalize if ml_anomaly_score not available
+        if threat_vectors.get('ml_anomaly_score', 0) == 0 and 'ml_anomaly_score' in threat_vectors:
+            # Recalculate without ML score
+            non_ml_weights = {k: v for k, v in weights.items() if k != 'ml_anomaly_score'}
+            weight_sum = sum(non_ml_weights.values())
+            if weight_sum > 0:
+                composite_threat = sum(
+                    threat_vectors[vector] * (weights[vector] / weight_sum)
+                    for vector in non_ml_weights
+                )
         
         threat_classification = self._classify_threat_level(composite_threat)
         
@@ -753,6 +849,24 @@ class RiskAssessor:
             forensic_score += 0.2
         
         return min(forensic_score, 1.0)
+    
+    def _detect_behavioral_anomaly(self, node: NodeProfile) -> float:
+        """Detect behavioral anomalies using ML-based methods
+        
+        Phase 2.3: Integrates ML anomaly detection for honeypot identification.
+        """
+        if not self.ml_detector:
+            return 0.0  # No ML detector available
+        
+        try:
+            anomaly_score, reason = self.ml_detector.detect_anomaly(node)
+            if anomaly_score > 0.5:
+                logger.debug(f"Behavioral anomaly detected for {node.ip_address}: "
+                         f"score={anomaly_score:.2f}, reason={reason}")
+            return anomaly_score
+        except Exception as e:
+            logger.warning(f"Error in ML behavioral anomaly detection: {e}")
+            return 0.0
     
     def _classify_threat_level(self, threat_score: float) -> ThreatLevel:
         """Classify threat level based on composite score"""
@@ -1465,6 +1579,8 @@ class RelayTransmitter:
 # =============================================================================
 
 class ScoutAgent:
+    # Economic integration: accountant engine
+    accountant: Any = None
     """
     Autonomous Scout Agent capable of network reconnaissance, anomaly detection,
     and intelligent intelligence reporting.
@@ -1474,7 +1590,8 @@ class ScoutAgent:
     def __init__(self, agent_id: str,
                  initial_target_range: List[str],
                  command_center_address: str,
-                 log_level=logging.INFO):
+                 log_level=logging.INFO,
+                 target_blacklist_ttl: int = 86400):
         self.agent_id = AgentID(f"{self.AGENT_ID_PREFIX}{agent_id}")
         self.initial_target_range = initial_target_range
         self.command_center_address = command_center_address
@@ -1487,6 +1604,12 @@ class ScoutAgent:
         self.operational_status: AgentStatus = AgentStatus.DORMANT
         self.last_report_time: datetime = datetime.now()
         self.report_interval: timedelta = timedelta(minutes=10) # Default report interval
+        
+        # Target blacklist: {target_ip: timestamp_added}
+        self.target_blacklist: Dict[str, float] = {}
+        self.target_blacklist_ttl = target_blacklist_ttl
+        self.blacklist_lock = threading.Lock()
+        
         # Asynchronous tasks and queues
         self.scan_queue = asyncio.Queue()
         self.analysis_queue = asyncio.Queue()
@@ -1496,6 +1619,85 @@ class ScoutAgent:
         self.running_tasks = []
         self._stop_event = asyncio.Event()
         self.black_vault = None  # Will be injected by kernel for secure storage
+
+        # Real network scanner integration (Phase 0)
+        if REAL_SCANNER_AVAILABLE:
+            self.real_scanner = RealNetworkScanner()
+            self.logger.info("[✅] Scout agent initialized with REAL network scanner")
+        else:
+            self.real_scanner = None
+            self.logger.warning("[⚠️] Scout agent falling back to simulated scanning")
+
+        # Topology and target queue
+        self.topology_graph = type('obj', (object,), {'discovered_nodes': {}})()
+        self.target_queue = PriorityQueue()
+
+        # Economic integration: try to get accountant from kernel if present
+        try:
+            from agents.accountant import ACCLedger
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+        except Exception:
+            self.accountant = None
+
+        # Register agent wallet if accountant is available
+        if self.accountant:
+            from decimal import Decimal
+            self.accountant.register_agent(str(self.agent_id), Decimal('50'))  # Default initial budget
+
+    def _is_target_blacklisted(self, target: str) -> bool:
+        """Check if target is on blacklist and not expired."""
+        with self.blacklist_lock:
+            if target in self.target_blacklist:
+                age = time.time() - self.target_blacklist[target]
+                if age < self.target_blacklist_ttl:
+                    return True
+                else:
+                    # Blacklist entry expired, remove it
+                    del self.target_blacklist[target]
+        return False
+
+    def _add_to_blacklist(self, target: str) -> None:
+        """Add target to blacklist after successful propagation."""
+        with self.blacklist_lock:
+            self.target_blacklist[target] = time.time()
+        self.logger.info(
+            f"[🚫] Target added to blacklist: {target} "
+            f"(TTL: {self.target_blacklist_ttl}s)"
+        )
+
+    def _cleanup_expired_blacklist_entries(self) -> None:
+        """Remove expired entries from blacklist."""
+        with self.blacklist_lock:
+            now = time.time()
+            expired = [
+                target for target, added_time in self.target_blacklist.items()
+                if (now - added_time) >= self.target_blacklist_ttl
+            ]
+            for target in expired:
+                del self.target_blacklist[target]
+            if expired:
+                self.logger.debug(f"[🧹] Blacklist cleanup: removed {len(expired)} expired entries")
+
+    def _deduct_scan_cost(self, scan_depth: int):
+        """Deduct Root for scanning (1 Root per scan, +1 per 5 depth)."""
+        if self.accountant:
+            from decimal import Decimal
+            cost = Decimal('1') + Decimal(int(scan_depth / 5))
+            self.accountant.process_agent_spend(str(self.agent_id), cost, f"Scan cost (depth {scan_depth})")
+
+    def _reward_report(self):
+        if self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.agent_id)].balance += Decimal('10')
+            self.accountant.treasury_balance -= Decimal('10')
+            self.logger.info(f"Rewarded 10 Root to {self.agent_id} for intelligence report.")
+
+    def _burn_on_failure(self):
+        if self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('2')
+            self.accountant.agent_wallets[str(self.agent_id)].balance -= penalty
+            self.logger.info(f"Burned 2 Root from {self.agent_id} for failed operation.")
 
     def _setup_logger(self, level: int) -> logging.Logger:
         """Configures the agent's logger."""
@@ -1542,12 +1744,25 @@ class ScoutAgent:
                 scan_request = await asyncio.wait_for(self.scan_queue.get(), timeout=1.0)
                 target = scan_request['target']
                 scan_depth = scan_request['scan_depth']
+                
+                # Check blacklist before scanning
+                target_str = str(target)
+                if self._is_target_blacklisted(target_str):
+                    self.logger.info(f"[⏭️] Skipping blacklisted target: {target}")
+                    self.scan_queue.task_done()
+                    continue
+                
                 self.logger.debug(f"[{self.agent_id}] Scanning target: {target} (Depth: {scan_depth})")
                 
                 # Simulate scanning
                 scan_results = await self._perform_scan(target, scan_depth)
                 await self.analysis_queue.put(scan_results)
                 self.scan_queue.task_done()
+                
+                # Periodic blacklist cleanup
+                if random.random() < 0.1:  # 10% chance per iteration
+                    self._cleanup_expired_blacklist_entries()
+                    
             except asyncio.TimeoutError:
                 continue # No items in queue, continue loop
             except Exception as e:
@@ -1556,7 +1771,9 @@ class ScoutAgent:
     async def _perform_scan(self, target_ip: str, depth: int) -> Dict[str, Any]:
         """Simulates a network scan and gathers preliminary node data."""
         self.logger.info(f"[{self.agent_id}] Performing scan on {target_ip} with depth {depth}...")
-        
+        # Deduct scan cost (economic logic)
+        self._deduct_scan_cost(depth)
+
         # Simulate varying scan times based on tactical mode and depth
         base_scan_time = 0.5 * depth / self.current_tactical_mode_config['speed_multiplier']
         await asyncio.sleep(random.uniform(base_scan_time * 0.8, base_scan_time * 1.2))
@@ -1694,14 +1911,17 @@ class ScoutAgent:
             'urgent_notification': urgent_item
         }
 
-        # Example of how to send different types of reports
+        # Select protocol
         target_system_protocol = 'ELD-SCRY'
         if urgent_item:
-            target_system_protocol = 'INFILTRATOR' # Use a more immediate protocol for urgent
-        elif len(self.known_nodes) > 100: # If many nodes, use batched protocol
+            target_system_protocol = 'INFILTRATOR'  # Use a more immediate protocol for urgent
+        elif len(self.known_nodes) > 100:
             target_system_protocol = 'SYNCH-CORE'
-        elif (datetime.now() - self.last_report_time) > timedelta(hours=1): # Long interval, comprehensive
+        elif (datetime.now() - self.last_report_time) > timedelta(hours=1):
             target_system_protocol = 'ARCH-MALTA'
+
+        # Reward agent for sending report (economic logic)
+        self._reward_report()
 
         try:
             transmission_result = self.relay_transmitter.transmit_intelligence_report(
@@ -1848,6 +2068,79 @@ async def main():
         logging.info("Main execution cancelled.")
     finally:
         await scout_alpha.stop() # Ensure proper shutdown
+
+# ============================================================================
+# SHOGUN INTEGRATION - Network Topology Consumption
+# ============================================================================
+
+class ShogunTopologyConsumer:
+    """Consume Shogun network topology data to enhance Scout profiling."""
+    
+    @staticmethod
+    def integrate_shogun_topology(scout_agent: 'ScoutAgent', shogun_topology: Dict[str, Any]):
+        """
+        Enhance scout profiles with Shogun passive intelligence.
+        
+        Args:
+            scout_agent: ScoutAgent instance
+            shogun_topology: Topology dict from ShogunReconAgent
+        """
+        if not shogun_topology or "nodes" not in shogun_topology:
+            return
+        
+        log = logging.getLogger("SHOGUN-CONSUMER")
+        
+        for ip, node_data in shogun_topology["nodes"].items():
+            if not isinstance(node_data, dict):
+                continue
+            
+            # Create or update NodeProfile from Shogun data
+            node_id = AgentID(value=f"SCOUT-{ip}")
+            profile = NodeProfile(
+                node_id=node_id,
+                ip_address=ip,
+                open_ports=node_data.get("open_ports", []),
+                services={svc: "discovered" for svc in node_data.get("services", [])},
+                system_fingerprint=node_data.get("vendor", "Unknown"),
+                behavioral_signature=f"HOSTNAMES: {','.join(node_data.get('hostnames', []))}",
+                vulnerability_indicators=node_data.get("os_hints", []),
+                threat_score=0.0  # Default; can be enhanced
+            )
+            
+            # Enrichments from Shogun
+            profile.honeypot_probability = 0.1 if "router" in node_data.get("vendor", "").lower() else 0.05
+            profile.is_honeypot = False
+            
+            # Store in scout topology
+            scout_agent.topology_graph.discovered_nodes[node_id] = profile  # type: ignore
+            log.debug(f"Integrated Shogun node: {ip} ({node_data.get('vendor')})")
+    
+    @staticmethod
+    def target_zombie_candidates(scout_agent: 'ScoutAgent', zombie_candidates: List[Dict]):
+        """
+        Prioritize zombie candidates for deep reconnaissance.
+        
+        Args:
+            scout_agent: ScoutAgent instance
+            zombie_candidates: List of zombie candidate dicts from Shogun
+        """
+        log = logging.getLogger("SHOGUN-CONSUMER")
+        
+        if not zombie_candidates:
+            return
+        
+        log.info(f"[🧟] Prioritizing {len(zombie_candidates)} zombie candidates for deep recon")
+        
+        # Add zombies to scout target queue with high priority
+        try:
+            for zombie in sorted(zombie_candidates, key=lambda x: x.get("confidence", 0), reverse=True):
+                ip = zombie.get("ip")
+                if ip:
+                    scout_agent.target_queue.put_nowait((0, ip))  # Priority 0 = highest
+                    log.info(f"  Queued zombie: {ip} (conf: {zombie.get('confidence', 0):.2f})")
+        except Exception as e:
+            log.error(f"Failed to queue zombies: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

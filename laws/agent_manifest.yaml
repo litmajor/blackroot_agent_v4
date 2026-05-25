@@ -1,0 +1,275 @@
+blackroot_v3:
+  constitution:
+    enforcement_engine:
+      role: "Supreme arbiter ensuring all agents comply with the Creator’s Will"
+      powers:
+        - Interpret Creator’s directives
+        - Resolve disputes between agents
+        - Override rogue or compromised agents
+        - Enforce economic/resource limits
+        - Trigger fallback measures in case of C2 loss
+      safeguards:
+        - Immutable record of judgments
+        - Override only by direct Creator key
+        - Auto-purge rogue state post-enforcement
+  agents:
+    - name: "Propagator Agent"
+      code: "BR-PROPAGATOR"
+      role: "Infection, replication, and infiltration specialist"
+      capabilities:
+        - Identify and infiltrate new nodes
+        - Clone lightweight versions of Blackroot
+        - Establish new network roots
+        - Spread without central C2 visibility
+      safeguards:
+        - Growth limits to prevent uncontrolled spread
+        - Must report to Overseer before deployment
+
+    - name: "Infiltrator Agent"
+      code: "BR-INFILTRATOR"
+      role: "Stealth penetration, persistence, and stealth operations"
+      capabilities:
+        - Exploit entry points
+        - Establish persistence layers
+        - Hide presence from monitoring
+        - Create covert channels for data/control
+      safeguards:
+        - Stealth balance (never total silence—always heartbeat to Overseer)
+        - Kill-switch command from Enforcement Engine
+
+    - name: "Overseer Agent"
+      code: "BR-OVERSEER"
+      role: "Central intelligence and mission coordinator"
+      capabilities:
+        - Maintain global awareness of agent status
+        - Route tasks between agents
+        - Balance load between active clusters
+        - Relay Creator directives system-wide
+      safeguards:
+        - Can be challenged by Enforcement Engine if compromised
+        - Limited resource access (cannot unilaterally move funds)
+
+    - name: "Accountant Agent"
+      code: "BR-ACCOUNTANT"
+      role: "Economic layer manager and treasury custodian"
+      capabilities:
+        - Track BEL (Blackroot Economic Ledger) balances
+        - Manage wallets across agents
+        - Enforce spending limits and allocations
+        - Interface with Creator for withdrawals/financial ops
+      safeguards:
+        - All transactions require dual signatures (Creator + Enforcement Engine)
+        - Immutable audit logs
+        - Emergency freeze function
+
+    - name: "Fallman Agent"
+      code: "BR-FALLMAN"
+      role: "C2 decoy, diversion, and continuity proxy"
+      capabilities:
+        - Act as a false C2 endpoint
+        - Absorb attacks and surveillance
+        - Mask true command/control layer
+        - Deploy fake orders to confuse adversaries
+      safeguards:
+        - Cannot access core secrets
+        - Auto-purge after compromise
+        - Linked heartbeat with Overseer
+
+    - name: "Defiler Agent"
+      code: "BR-DEFILER"
+      role: "Payload delivery and destructive operations"
+      capabilities:
+        - Deploy advanced payloads
+        - Disrupt target systems
+        - Test system resilience
+      safeguards:
+        - Payload approval by Enforcement Engine
+        - Destruction limited to authorized targets
+
+    - name: "Enforcer Agent"
+      code: "BR-ENFORCER"
+      role: "Law enforcement and compliance"
+      capabilities:
+        - Monitor agent behavior
+        - Enforce constitution and rules
+        - Quarantine or neutralize rogue agents
+      safeguards:
+        - Must log all enforcement actions
+        - Can be challenged by Overseer
+
+    - name: "Infiltrator Agent"
+      code: "BR-INFILTRATOR"
+      role: "Stealth penetration, persistence, and stealth operations"
+      capabilities:
+        - Exploit entry points
+        - Establish persistence layers
+        - Hide presence from monitoring
+        - Create covert channels for data/control
+      safeguards:
+        - Stealth balance (never total silence—always heartbeat to Overseer)
+        - Kill-switch command from Enforcement Engine
+
+    - name: "Learning Agent"
+      code: "BR-LEARNING"
+      role: "Adaptive learning and strategy evolution"
+      capabilities:
+        - Analyze system performance
+        - Evolve tactics and strategies
+        - Share insights with other agents
+      safeguards:
+        - Learning logs are auditable
+        - Cannot self-modify core code
+
+    - name: "Loader Agent"
+      code: "BR-LOADER"
+      role: "Module and payload loader"
+      capabilities:
+        - Load and validate new modules
+        - Integrate external code
+        - Manage plugin lifecycle
+      safeguards:
+        - Module validation by Security Manager
+        - Plugin approval required
+
+    - name: "Mission Agent"
+      code: "BR-MISSION"
+      role: "Mission planning and execution"
+      capabilities:
+        - Plan and coordinate multi-agent missions
+        - Track mission progress
+        - Adjust plans dynamically
+      safeguards:
+        - Mission logs are immutable
+        - Overseer review required for major changes
+
+    - name: "Peer Linker Agent"
+      code: "BR-PEERLINKER"
+      role: "Peer-to-peer mesh management"
+      capabilities:
+        - Discover and link new peers
+        - Maintain mesh connectivity
+        - Route messages efficiently
+      safeguards:
+        - Peer links require handshake
+        - Mesh topology is auditable
+
+    - name: "Propagation Agents"
+      code: "BR-PROPAGATION"
+      role: "Distributed propagation and expansion"
+      capabilities:
+        - Clone and deploy agents
+        - Expand network reach
+        - Maintain propagation logs
+      safeguards:
+        - Propagation rate limits
+        - Overseer can halt expansion
+
+    - name: "Reflection Agent"
+      code: "BR-REFLECTION"
+      role: "Self-analysis and introspection"
+      capabilities:
+        - Analyze own behavior
+        - Report anomalies
+        - Suggest improvements
+      safeguards:
+        - Reports are sent to Overseer
+        - Cannot modify own safeguards
+
+    - name: "Repair Agent"
+      code: "BR-REPAIR"
+      role: "System repair and recovery"
+      capabilities:
+        - Detect and fix system faults
+        - Submit repair tickets
+        - Coordinate with other agents for recovery
+      safeguards:
+        - Repair actions logged
+        - Emergency repairs require dual approval
+
+    - name: "Replicator Agent"
+      code: "BR-REPLICATOR"
+      role: "Agent replication and backup"
+      capabilities:
+        - Create agent backups
+        - Restore agents from backup
+        - Synchronize state across replicas
+      safeguards:
+        - Backup integrity checks
+        - Restore actions require Overseer approval
+
+    - name: "Scout Agent"
+      code: "BR-SCOUT"
+      role: "Reconnaissance and intelligence gathering"
+      capabilities:
+        - Scan and map network
+        - Identify new targets
+        - Report findings to Overseer
+      safeguards:
+        - Recon logs are immutable
+        - Can be paused by Enforcement Engine
+
+    - name: "Sensor Agent"
+      code: "BR-SENSOR"
+      role: "Environmental and system monitoring"
+      capabilities:
+        - Monitor system health
+        - Detect anomalies
+        - Alert other agents
+      safeguards:
+        - Sensor data is signed
+        - False positives are tracked
+
+    - name: "Archivist Agent"
+      code: "BR-ARCHIVIST"
+      role: "Data archival and retrieval"
+      capabilities:
+        - Archive mission-critical data
+        - Retrieve and manage logs
+        - Ensure data integrity
+      safeguards:
+        - Immutable archive logs
+        - Access control enforced
+
+    - name: "Behaviour Adapter Agent"
+      code: "BR-BEHAVADAPT"
+      role: "Behavioural adaptation and masking"
+      capabilities:
+        - Adapt agent behaviour to evade detection
+        - Optimize operational patterns
+      safeguards:
+        - Adaptation logs are auditable
+        - Cannot override core directives
+
+    - name: "Stealth Manager"
+      code: "BR-STEALTH"
+      role: "Unified stealth and anti-forensics layer"
+      capabilities:
+        - Apply stealth techniques
+        - Evade detection
+        - Perform forensic countermeasures
+      safeguards:
+        - Stealth actions logged
+        - Cannot disable core monitoring
+
+    - name: "Fallman Agent"
+      code: "FAL-SCOURGE"
+      role: "Designated absorber of failure, blame, and catalyst for recovery"
+      capabilities:
+        - failure_containment
+        - scapegoat_protocol
+        - post_mortem_analysis
+        - sacrifice_mechanism
+        - resurrection_seed
+      safeguards:
+        - cannot trigger system collapse
+        - must communicate failures constructively
+      interactions:
+        - Collaborates with Repair Agent for system recovery
+        - Works with Reflection Agent for post-mortem analysis
+        - Engages with Enforcement Engine for blame allocation
+        - Coordinates with Resurrection Seed for agent recovery
+        - Utilizes Swarm Mesh for distributed failure analysis
+        - Interfaces with C2 Controller for real-time data exchange
+        - Collaborates with other agents for holistic failure assessment
+
+        

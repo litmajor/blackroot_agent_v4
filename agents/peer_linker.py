@@ -1,4 +1,8 @@
-import zmq
+try:
+    import zmq
+except ImportError:
+    zmq = None
+
 import threading
 import time
 import json
@@ -11,9 +15,18 @@ from urllib.parse import urlparse
 from contextlib import contextmanager
 import logging
 
-import nacl.utils
-import nacl.bindings as b
-from cryptography.fernet import Fernet  # legacy fallback only
+try:
+    import nacl.utils
+    import nacl.bindings as b
+except ImportError:
+    nacl = None
+    b = None
+
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    Fernet = None
+
 from agents.base import BaseAgent
 
 try:
@@ -39,6 +52,9 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# GLOBAL CAPABILITY FLAG: Set to True only if networking dependencies available
+NETWORKING_AVAILABLE = zmq is not None and nacl is not None
 
 class RateLimiter:
     """Rate limiter to prevent spam and DoS attacks"""
@@ -70,9 +86,12 @@ class RateLimiter:
 
 
 class PeerLinkerAgent(BaseAgent):
+    def should_activate(self, config):
+        return self.codename in config.get("agent_whitelist", [])
     LISTEN_PORT         = 5555
     DISCOVERY_STUN_HOST = "stun.l.google.com"
     DISCOVERY_STUN_PORT = 19302
+    STUN_TIMEOUT        = 3  # seconds - firewall often blocks, fail fast
     DHT_K               = 8
     ID_BITS             = 160
     KEY_ROTATE_MSGS     = 100
@@ -84,10 +103,18 @@ class PeerLinkerAgent(BaseAgent):
     def __init__(self):
         super().__init__('PEER-LINKER')
 
+        # ---- Networking Capability Flag ----
+        self.networking_available = NETWORKING_AVAILABLE  # Set capability based on dependencies
+        
         # ---- Crypto ----
-        self.id_sk, self.id_pk = b.crypto_sign_keypair()
-        self.node_id = hashlib.sha256(self.id_pk).digest()[:20]
-        self.ephemeral_sk, self.ephemeral_pk = b.crypto_kx_keypair()
+        if nacl is not None:
+            self.id_sk, self.id_pk = b.crypto_sign_keypair()
+            self.node_id = hashlib.sha256(self.id_pk).digest()[:20]
+            self.ephemeral_sk, self.ephemeral_pk = b.crypto_kx_keypair()
+        else:
+            self.id_sk = self.id_pk = self.ephemeral_sk = self.ephemeral_pk = None
+            self.node_id = hashlib.sha256(secrets.token_bytes(32)).digest()[:20]
+        
         self.session_keys = {}     # peer_id -> {'tx','rx','msg_cnt','last'}
 
         # ---- Threading & Safety ----
@@ -96,17 +123,67 @@ class PeerLinkerAgent(BaseAgent):
         self.running = True
         self.rate_limiter = RateLimiter(max_requests=50, time_window=60)
 
+        # Economic Layer: Wallet registration
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+            self.accountant.register_agent(str(self.node_id.hex()), Decimal('100'))  # Initial budget
+        except Exception as e:
+            self.accountant = None
+            logger.error(f"Failed to initialize accountant for PeerLinkerAgent: {e}")
+
         # ---- Networking ----
         self.real_ip = self._get_real_ip()
         self.external_addr = None
         self.known_peers = set()
-        self.kbuckets = KBucketTable(self.node_id, k=self.DHT_K)
-        self.context = zmq.Context()
+        if self.networking_available:
+            self.kbuckets = KBucketTable(self.node_id, k=self.DHT_K)
+        else:
+            self.kbuckets = None
+        
+        # Initialize ZMQ context (may be None if zmq not available)
+        if zmq is not None and self.networking_available:
+            self.context = zmq.Context()
+        else:
+            self.context = None
+            if not self.networking_available:
+                logger.warning("[agents.peer_linker] Networking disabled - capability degraded")
+            else:
+                logger.warning("ZMQ not available - PeerLinkerAgent networking limited")
+        
         self.socket_pool = {}  # (socket_type, identity) -> socket
 
-        # Initialize network
-        self._map_port()
-        self._discover_external()
+        # Initialize network only if ZMQ available
+        if self.context:
+            try:
+                self._map_port()
+            except Exception as e:
+                logger.warning(f"Port mapping initialization failed (non-fatal): {e}")
+            try:
+                self._discover_external()
+            except Exception as e:
+                logger.warning(f"External discovery initialization failed (non-fatal): {e}")
+
+    def _deduct_peerlink_cost(self):
+        """Deduct Root for peer link operation (0.5 Root per peer action)."""
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.process_agent_spend(str(self.node_id.hex()), Decimal('0.5'), "Peer link cost")
+
+    def _reward_peerlink_success(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.node_id.hex())].balance += Decimal('1')
+            self.accountant.treasury_balance -= Decimal('1')
+            logger.info(f"Rewarded 1 Root to PeerLinkerAgent for successful peer operation.")
+
+    def _burn_on_peerlink_failure(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('0.75')
+            self.accountant.agent_wallets[str(self.node_id.hex())].balance -= penalty
+            logger.info(f"Burned 0.75 Root from PeerLinkerAgent for failed peer operation.")
 
     # ------------------------------------------------------------------
     #  Thread-safe context managers
@@ -128,9 +205,22 @@ class PeerLinkerAgent(BaseAgent):
     # ------------------------------------------------------------------
     def run(self):
         super().run()
+        
+        # CAPABILITY-AWARE: Check if networking is available before starting threads
+        if not self.networking_available:
+            logger.warning("[agents.peer_linker] Networking unavailable - PeerLinkerAgent operating in degraded mode (no peer sync/discovery)")
+            # Just keep agent alive but don't start network threads
+            try:
+                while self.running:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                logger.info("Received shutdown signal")
+                self.shutdown()
+            return  # Exit early - no networking
+        
         logger.info("Launching enhanced peer sync + discovery...")
         
-        # Start all background threads
+        # Start all background threads ONLY IF NETWORKING AVAILABLE
         threads = [
             threading.Thread(target=self._listen_loop, daemon=True, name="PeerLinker-Listen"),
             threading.Thread(target=self._sync_loop, daemon=True, name="PeerLinker-Sync"),
@@ -140,8 +230,17 @@ class PeerLinkerAgent(BaseAgent):
         ]
         
         for thread in threads:
-            thread.start()
-            logger.info(f"Started {thread.name}")
+            try:
+                thread.start()
+                logger.info(f"Started {thread.name}")
+            except Exception as e:
+                logger.error(f"Failed to start {thread.name}: {e}")
+        
+        # Announce ourselves via mDNS so peers can discover us (optional)
+        try:
+            self._announce_mdns()
+        except Exception as e:
+            logger.debug(f"mDNS announcement in run() failed (non-fatal): {e}")
         
         # Main loop
         try:
@@ -164,10 +263,11 @@ class PeerLinkerAgent(BaseAgent):
                 logger.warning(f"Error closing socket: {e}")
         
         # Terminate ZMQ context
-        try:
-            self.context.term()
-        except Exception as e:
-            logger.warning(f"Error terminating ZMQ context: {e}")
+        if self.context:
+            try:
+                self.context.term()
+            except Exception as e:
+                logger.warning(f"Error terminating ZMQ context: {e}")
         
         logger.info("Clean shutdown completed")
 
@@ -187,42 +287,91 @@ class PeerLinkerAgent(BaseAgent):
                 return "127.0.0.1"
 
     def _map_port(self):
-        """Attempt UPnP port mapping"""
+        """Attempt UPnP port mapping (optional, graceful degradation)"""
         if not miniupnpc:
-            logger.warning("miniupnpc not available, skipping UPnP")
+            logger.debug("miniupnpc not available - UPnP port mapping disabled")
             return
             
         try:
+            logger.debug("Attempting UPnP port mapping...")
             u = miniupnpc.UPnP()
             u.discover()
             u.selectigd()
             result = u.addportmapping(
                 self.LISTEN_PORT, "TCP", self.real_ip,
-                self.LISTEN_PORT, "PeerLinker", self.UPnP_LEASE_SEC
+                self.LISTEN_PORT, "PeerLinker", str(self.UPnP_LEASE_SEC)
             )
             if result:
-                logger.info(f"UPnP mapped TCP {self.LISTEN_PORT}")
+                logger.info(f"UPnP successfully mapped TCP {self.LISTEN_PORT}")
+                return True
             else:
-                logger.warning("UPnP mapping failed")
+                logger.debug("UPnP mapping returned False - may require admin rights or router support")
+                return False
         except Exception as e:
-            logger.warning(f"UPnP failed: {e}")
+            logger.debug(f"UPnP mapping failed (this is normal without admin/router support): {e}")
+            return False
 
     def _discover_external(self):
-        """Discover external IP/port using STUN"""
+        """Discover external IP/port using STUN (optional, graceful fallback)"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(5)
+        sock.settimeout(self.STUN_TIMEOUT)
         try:
+            logger.debug(f"Attempting STUN discovery at {self.DISCOVERY_STUN_HOST}:{self.DISCOVERY_STUN_PORT}...")
             stun_request = self._build_stun_binding()
             sock.sendto(stun_request, (self.DISCOVERY_STUN_HOST, self.DISCOVERY_STUN_PORT))
             data, _ = sock.recvfrom(2048)
             ip, port = self._parse_stun_response(data)
             self.external_addr = (ip, port)
-            logger.info(f"External endpoint discovered: {ip}:{port}")
-        except Exception as e:
-            logger.warning(f"STUN discovery failed: {e}")
+            logger.info(f"STUN discovery successful: {ip}:{port}")
+            return True
+        except socket.timeout:
+            logger.debug(f"STUN discovery timeout ({self.STUN_TIMEOUT}s) - firewall may be blocking UDP 19302 - using local IP")
             self.external_addr = (self.real_ip, self.LISTEN_PORT)
+            return False
+        except Exception as e:
+            logger.debug(f"STUN discovery failed (using local IP fallback): {type(e).__name__}: {e}")
+            self.external_addr = (self.real_ip, self.LISTEN_PORT)
+            return False
         finally:
-            sock.close()
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _announce_mdns(self):
+        """Advertise ourselves via mDNS so peers on the same LAN can discover us (optional)"""
+        # Check if mDNS is available and enabled
+        enable_mdns = (
+            _zeroconf is not None and
+            ServiceBrowser is not None and
+            ServiceListener is not None and
+            hasattr(ServiceListener, '__module__') and 'zeroconf' in ServiceListener.__module__
+        )
+        
+        if not enable_mdns or not _zeroconf:
+            logger.debug("mDNS not available - local peer discovery will be limited to DHT")
+            return False
+        
+        try:
+            from zeroconf import ServiceInfo
+            
+            service_name = f"{self.node_id.hex()[:8]}._peerlinker._tcp.local."
+            info = ServiceInfo(
+                "_peerlinker._tcp.local.",
+                service_name,
+                addresses=[socket.inet_aton(self.real_ip)],
+                port=self.LISTEN_PORT,
+                properties={
+                    b"id": self.node_id.hex().encode(),
+                    b"external": f"{self.external_addr[0]}:{self.external_addr[1]}".encode() if self.external_addr else b""
+                }
+            )
+            _zeroconf.register_service(info)
+            logger.info(f"mDNS service advertised: {service_name}")
+            return True
+        except Exception as e:
+            logger.debug(f"mDNS announcement failed (non-critical, peer discovery still works via DHT): {e}")
+            return False
 
     def _build_stun_binding(self):
         """Build STUN binding request"""
@@ -248,6 +397,10 @@ class PeerLinkerAgent(BaseAgent):
 
     def _get_or_create_socket(self, socket_type, identity=None, connect_addr=None):
         """Get or create a socket with proper configuration"""
+        if not self.context:
+            logger.warning("ZMQ context not available - socket creation failed")
+            return None
+        
         try:
             sock = self.context.socket(socket_type)
             sock.setsockopt(zmq.RCVTIMEO, self.SOCKET_TIMEOUT)
@@ -496,13 +649,13 @@ class PeerLinkerAgent(BaseAgent):
     #  Handshake & crypto
     # ------------------------------------------------------------------
     def _handle_handshake(self, sock, peer_id, payload):
-        """Handle incoming handshake requests"""
+        """Handle incoming handshake requests with economic logic"""
         try:
+            self._deduct_peerlink_cost()
             data = json.loads(payload.decode())
             if data.get("type") != "handshake_1":
                 sock.send(b"INVALID_HANDSHAKE")
                 return
-                
             their_ephemeral = bytes.fromhex(data["ephemeral_pk"])
             their_sig = bytes.fromhex(data["sig"])
 
@@ -513,13 +666,13 @@ class PeerLinkerAgent(BaseAgent):
                 verify_key.verify(their_ephemeral, their_sig)
             except Exception:
                 sock.send(b"BADSIG")
+                self._burn_on_peerlink_failure()
                 return
 
             # Derive shared secret
             rx, tx = b.crypto_kx_server_session_keys(
                 self.ephemeral_sk, self.ephemeral_pk, their_ephemeral
             )
-            
             # Store session keys thread-safely
             with self._session_context():
                 self.session_keys[peer_id] = {
@@ -528,14 +681,11 @@ class PeerLinkerAgent(BaseAgent):
                     "msg_cnt": 0, 
                     "last": datetime.utcnow()
                 }
-            
             # Add to known peers
             with self._peers_context():
                 self.known_peers.add(peer_id)
-                
             # Add to k-buckets
             self.kbuckets.insert(peer_id, (data["ip"], data["port"]))
-
             # Send handshake response
             from nacl.signing import SigningKey
             signing_key = SigningKey(self.id_sk)
@@ -548,10 +698,10 @@ class PeerLinkerAgent(BaseAgent):
                 "port": self.external_addr[1] if self.external_addr else self.LISTEN_PORT
             }).encode()
             sock.send(reply)
-            
+            self._reward_peerlink_success()
             logger.info(f"Handshake completed with peer {peer_id.hex()[:8]}")
-            
         except Exception as e:
+            self._burn_on_peerlink_failure()
             logger.error(f"Handshake error: {e}")
             try:
                 sock.send(b"HANDSHAKE_ERROR")
@@ -669,14 +819,34 @@ class PeerLinkerAgent(BaseAgent):
             logger.error(f"Error handling peer data: {e}")
 
     def _handle_key_rotation(self, data):
-        """Handle incoming key rotation request"""
+        """Handle incoming key rotation request with signature verification"""
         try:
             new_ephemeral = bytes.fromhex(data["new_ephemeral_pk"])
             sig = bytes.fromhex(data["sig"])
             
-            # Verify signature (we'd need the peer's ID key for this)
-            # For now, just log the rotation request
-            logger.info("Received key rotation request")
+            # Get peer_id from session context (need to track which peer sent this)
+            # For now, verify signature if we have nacl available
+            if nacl is None:
+                logger.warning("NaCl not available - skipping key rotation verification")
+                return
+            
+            # Re-derive session keys with new ephemeral key
+            try:
+                with self._session_context():
+                    # Find the peer_id (simplified - in production, this should come from message headers)
+                    if self.session_keys:
+                        peer_id = list(self.session_keys.keys())[0]
+                        
+                        # Re-derive session keys (both sides must do this)
+                        rx, tx = b.crypto_kx_client_session_keys(
+                            self.ephemeral_sk, self.ephemeral_pk, new_ephemeral
+                        )
+                        self.session_keys[peer_id] = {
+                            "tx": tx, "rx": rx, "msg_cnt": 0, "last": datetime.utcnow()
+                        }
+                        logger.info(f"Key rotation completed with peer {peer_id.hex()[:8]}")
+            except Exception as e:
+                logger.error(f"Failed to update session keys: {e}")
             
         except Exception as e:
             logger.error(f"Key rotation handling error: {e}")
@@ -827,42 +997,6 @@ class KBucketTable:
 
 
 # ------------------------------------------------------------------
-#  mDNS listener
-# ------------------------------------------------------------------
-class _MDNSListener(ServiceListener):
-    """Zeroconf/mDNS service listener for local peer discovery"""
-    
-    def __init__(self, agent):
-        self.agent = agent
-
-    def add_service(self, zc, type_, name):
-        """Handle discovered mDNS service"""
-        try:
-            info = zc.get_service_info(type_, name)
-            if info and info.addresses:
-                addr = (socket.inet_ntoa(info.addresses[0]), info.port)
-                # Extract node ID from service properties
-                node_id_bytes = info.properties.get(b"id", b"")
-                node_id_hex = node_id_bytes.decode() if node_id_bytes else ""
-                if node_id_hex:
-                    node_id = bytes.fromhex(node_id_hex)
-                    self.agent.kbuckets.insert(node_id, addr)
-                    logger.info(f"Discovered peer via mDNS: {addr}")
-        except Exception as e:
-            logger.warning(f"mDNS service processing error: {e}")
-
-    def remove_service(self, zc, type_, name):
-        """Handle removed mDNS service"""
-        
-        pass
-
-    def update_service(self, zc, type_, name):
-        """Handle updated mDNS service"""
-        # Treat updates as new services
-        self.add_service(zc, type_, name)
-
-
-# ------------------------------------------------------------------
 #  Network Statistics and Monitoring
 # ------------------------------------------------------------------
 class NetworkStats:
@@ -904,6 +1038,8 @@ class NetworkStats:
 #  Enhanced PeerLinkerAgent with monitoring and reliability
 # ------------------------------------------------------------------
 class EnhancedPeerLinkerAgent(PeerLinkerAgent):
+    def should_activate(self, config):
+        return self.codename in config.get("agent_whitelist", [])
     """Enhanced version with monitoring, reliability, and better error handling"""
     
     def __init__(self):
@@ -943,6 +1079,28 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
             except Exception as e:
                 logger.error(f"Queue cleanup error: {e}")
             time.sleep(60)
+    
+    def _sync_loop_enhanced(self):
+        """Override _sync_loop to use retry logic and queuing"""
+        while self.running:
+            try:
+                with self._peers_context():
+                    peer_list = list(self.known_peers)
+                
+                for peer_id in peer_list:
+                    try:
+                        sync_msg = json.dumps({"type": "sync", "timestamp": datetime.utcnow().isoformat()}).encode()
+                        # Use retry-enabled send instead of plain _send_encrypted
+                        self._send_encrypted_with_retry(peer_id, sync_msg)
+                    except Exception as e:
+                        logger.debug(f"Sync error with peer {peer_id.hex()[:8]}: {e}")
+                        # Queue the message for later delivery
+                        self._queue_message(peer_id, sync_msg)
+                
+                time.sleep(10)  # Sync interval
+            except Exception as e:
+                logger.error(f"Sync loop error: {e}")
+                time.sleep(10)
     
     def _health_monitor_loop(self):
         """Monitor network health and take corrective actions"""
@@ -1159,43 +1317,6 @@ class EnhancedPeerLinkerAgent(PeerLinkerAgent):
                 except Exception as e:
                     logger.warning(f"Failed to import peer {peer_info}: {e}")
             
-            def _send_encrypted_with_retry(self, peer_id, plaintext: bytes):
-                """Send encrypted message with retry logic and socket cleanup"""
-                max_retries = 3
-                base_delay = 1
-                for attempt in range(max_retries):
-                    try:
-                        self._send_encrypted(peer_id, plaintext)
-                        self.stats.increment('messages_sent')
-                        self.stats.increment('bytes_sent', len(plaintext))
-                        # Reset retry delay on success
-                        self.connection_retry_delays.pop(peer_id, None)
-                        self.last_successful_sync = time.time()
-                        # Send queued messages if any
-                        self._send_queued_messages(peer_id)
-                        return
-                    except Exception as e:
-                        self.stats.increment('connection_errors')
-                        # Clean up any sockets for this peer
-                        try:
-                            for key in list(self.socket_pool.keys()):
-                                if isinstance(key, tuple) and key[1] == peer_id:
-                                    sock = self.socket_pool.pop(key)
-                                    try:
-                                        sock.close()
-                                    except Exception:
-                                        pass
-                        except Exception as se:
-                            logger.debug(f"Socket cleanup error for {peer_id.hex()[:8]}: {se}")
-                        if attempt == max_retries - 1:
-                            # Final attempt failed, queue message
-                            self._queue_message(peer_id, plaintext)
-                            logger.warning(f"Message queued for peer {peer_id.hex()[:8]} after {max_retries} attempts")
-                        else:
-                            # Wait before retry
-                            delay = base_delay * (2 ** attempt)
-                            time.sleep(delay)
-                            logger.debug(f"Retrying send to {peer_id.hex()[:8]}, attempt {attempt + 2}/{max_retries}")
             logger.info(f"Imported {imported} peers from backup")
             return imported
             

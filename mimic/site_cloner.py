@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 LOG = logging.getLogger("PowerClone")
 
 # Polyglot injection
-from polyglot_builder import inject_polyglot
+from mimic.polyglot_builder import inject_polyglot
 
 # ---------- CONFIG ----------
 CHROMIUM_PATH = shutil.which("chromium-browser") or shutil.which("google-chrome")
@@ -110,6 +110,6 @@ def clone_site(target: str, output_dir: str = "clones", silent: bool = False) ->
         return str(clone_path)
 
     _inject_payloads(clone_path)
-    inject_polyglot(str(clone_path))
+    inject_polyglot(str(clone_path), site_url=target)
     LOG.info("✅ Clone ready at %s", clone_path)
     return str(clone_path)

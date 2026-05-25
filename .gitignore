@@ -11,3 +11,12 @@ __pycache__
 /__pycache__/
 *.egg-info  
 .env
+.vscode
+.replit
+blackroot-archive.db
+c2-routing.db
+.key 
+.pk1
+.pk2
+logs/
+pki/

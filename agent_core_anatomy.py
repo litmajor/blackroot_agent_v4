@@ -26,6 +26,29 @@ from typing import Dict, List, Optional, Any
 from enum import Enum
 from collections import deque
 # ------------------------------------------------------------
+#  SEMANTIC VERSION CLASS
+# ------------------------------------------------------------
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class SemanticVersion:
+    major: int
+    minor: int
+    patch: int
+
+    def __str__(self):
+        return f"{self.major}.{self.minor}.{self.patch}"
+#  AGENT ID TYPE
+# ------------------------------------------------------------
+
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class AgentID:
+    value: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def __str__(self):
+        return self.value
 #  ENUMS
 # ------------------------------------------------------------
 __version__ = "1.0.0"
@@ -65,7 +88,7 @@ class Capability(Enum):
     Grouped by operational domain for readability.
     """
 
-    # ---------- ORIGINAL BLACKROOT CORE ----------
+    # ---------- CORE ----------
     COMMUNICATE        = "communicate"
     READ_MEMORY        = "read_memory"
     WRITE_MEMORY       = "write_memory"
@@ -77,24 +100,24 @@ class Capability(Enum):
     KILL_AGENT         = "kill_agent"
     ELEVATE_CAPABILITY = "elevate_capability"
     INSPECT_AGENT      = "inspect_agent"
-    BROADCAST         = "broadcast"
-    BIND_AGENT        = "bind_agent"
-    UNBIND_AGENT      = "unbind_agent"
-    FORWARD_EVENT     = "forward_event"
-    BOOT_AGENT        = "boot_agent"
-    
+    BROADCAST          = "broadcast"
+    BIND_AGENT         = "bind_agent"
+    UNBIND_AGENT       = "unbind_agent"
+    FORWARD_EVENT      = "forward_event"
+    BOOT_AGENT         = "boot_agent"
+
     # ---------- NEURO-ASSIMILATOR ----------
-    TRUST_EVALUATION     = "trust_evaluation"
-    CODE_SANITIZATION    = "code_sanitization"
-    CONTROL_INJECTION    = "control_injection"
-    PLUGIN_MANAGEMENT    = "plugin_management"
-    CODE_ASSIMILATION    = "code_assimilation"
-    PAYLOAD_EXECUTION    = "payload_execution"
-    SYSTEM_OBSERVATION   = "system_observation"
-    DECISION_MAKING      = "decision_making"
-    ACTION_EXECUTION     = "action_execution"
+    TRUST_EVALUATION      = "trust_evaluation"
+    CODE_SANITIZATION     = "code_sanitization"
+    CONTROL_INJECTION     = "control_injection"
+    PLUGIN_MANAGEMENT     = "plugin_management"
+    CODE_ASSIMILATION     = "code_assimilation"
+    PAYLOAD_EXECUTION     = "payload_execution"
+    SYSTEM_OBSERVATION    = "system_observation"
+    DECISION_MAKING       = "decision_making"
+    ACTION_EXECUTION      = "action_execution"
     RESOURCE_OPTIMIZATION = "resource_optimization"
-    VAULT_STORAGE        = "vault_storage"
+    VAULT_STORAGE         = "vault_storage"
     RELIABILITY_MONITORING = "reliability_monitoring"
     PERFORMANCE_PROFILING = "performance_profiling"
 
@@ -164,21 +187,21 @@ class Capability(Enum):
     PROCESS_KILL         = "process_kill"
     SERVICE_DISABLE      = "service_disable"
 
-    # ---------- CLEANUP & DEFILE ------
+    # ---------- CLEANUP & DEFILE ----------
     SECURE_DELETE        = "secure_delete"
     LOG_CLEANUP          = "log_cleanup"
     CACHE_CLEANUP        = "cache_cleanup"
     TEMP_CLEANUP         = "temp_cleanup"
     SELF_DELETE          = "self_delete"
 
-    # ---------- REFLECTION & INTROSPECTION ------
+    # ---------- REFLECTION & INTROSPECTION ----------
     PEER_SCORING         = "peer_scoring"
     CONFLICT_DETECTION   = "conflict_detection"
     PRUNE_BELIEFS        = "prune_beliefs"
     MISSION_REFINEMENT   = "mission_refinement"
     SNAPSHOT_EMISSION    = "snapshot_emission"
 
-    # ---------- SCOUT & SENSOR ------
+    # ---------- SCOUT & SENSOR ----------
     NETWORK_TOPOLOGY_MAP         = "network_topology_map"
     RISK_CONTOUR_ANALYSIS        = "risk_contour_analysis"
     BEHAVIORAL_ANOMALY_DETECTION = "behavioral_anomaly_detection"
@@ -194,6 +217,40 @@ class Capability(Enum):
     PROCESS_MONITOR              = "process_monitor"
     ANOMALY_CLASSIFICATION       = "anomaly_classification"
     BELIEF_BUILDING              = "belief_building"
+
+    # ---------- ECONOMIC LAYER ----------
+    WALLET_MANAGEMENT            = "wallet_management"
+    BEL_TRANSACTION              = "bel_transaction"
+    LIQUIDITY_OPTIMIZATION       = "liquidity_optimization"
+    STAKE_MANAGEMENT             = "stake_management"
+    BRIDGE_OPERATION             = "bridge_operation"
+    MARKET_MAKING                = "market_making"
+    AUDIT_LOGGING                = "audit_logging"
+    BLACKVAULT_INTEGRATION       = "blackvault_integration"
+
+    # ---------- REPLICATION & MESH ----------
+    SELF_REPLICATION             = "self_replication"
+    MESH_DISCOVERY               = "mesh_discovery"
+    CONSENSUS_ENGINE             = "consensus_engine"
+    IMMUTABLE_ARCHIVE            = "immutable_archive"
+    TAMPER_DETECTION             = "tamper_detection"
+
+    # ---------- GOVERNANCE ----------
+    GOVERNANCE_VOTE              = "governance_vote"
+    POLICY_ENFORCEMENT           = "policy_enforcement"
+    ROLE_ASSIGNMENT              = "role_assignment"
+    SYSTEM_EVENT                 = "system_event"
+
+    # ---------- ARCHIVE & AUDIT ----------
+    ARCHIVE_RECORD              = "archive_record"
+    SEGMENT_SEAL                = "segment_seal"
+    EPOCH_CHECKPOINT            = "epoch_checkpoint"
+    INTEGRITY_VERIFICATION      = "integrity_verification"
+    REPLICA_REGISTRATION        = "replica_registration"
+    CONSENSUS_CHECK             = "consensus_check"
+    TAMPER_ALERT                = "tamper_alert"
+    HISTORICAL_TREND_ANALYSIS   = "historical_trend_analysis"
+    AUDIT_EXPORT                = "audit_export"
 
 # ------------------------------------------------------------
 #  MISSION / EVENT / AGENT CORE
@@ -219,7 +276,8 @@ class Mission:
 class Event:
     event_type: str
     payload: Dict[str, Any]
-    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    event_id: str = field(default_factory=lambda
+                          : str(uuid.uuid4()))
     timestamp: float = field(default_factory=time.time)
     sender_id: Optional[str] = None
     target_id: Optional[str] = None
@@ -237,8 +295,10 @@ class Event:
         }
 
 @dataclass
+
 class AgentCore:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    agent_id: str = field(init=False)
     name: str = "unnamed"
     status: AgentStatus = AgentStatus.ACTIVE
     capabilities: List[Capability] = field(default_factory=list)
@@ -249,6 +309,9 @@ class AgentCore:
     last_heartbeat: float = field(default_factory=time.time)
     elder_role: Optional[ElderRole] = None
     identity_hash: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+
+    def __post_init__(self):
+        self.agent_id = self.id
 
     # Public helpers -------------------------------------------------
     def record_event(self, ev: Event):

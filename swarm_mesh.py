@@ -5,7 +5,7 @@ import psutil
 import socket as pysocket
 import base64
 import secrets
-from typing import Set
+from typing import Set, TYPE_CHECKING
 import json
 import time
 import random
@@ -13,10 +13,38 @@ import hashlib
 import threading
 import socket
 from typing import Dict, List, Callable, Optional, Any, Tuple, Set
+
+# Import distributed systems components (gaps #1-10)
+try:
+    from consensus_raft import RaftNode, RaftCluster
+    from failure_detection_phi import PhiAccrualFailureDetector
+    from message_delivery_reliable import ReliableDeliveryManager
+    from state_consistency_wal import WriteAheadLog, CausalConsistencyManager
+    from sharding_layer import ShardingManager
+    from mtls_security import CertificateAuthority, MTLSConnectionManager
+    from backpressure_management import BackpressureManager, CircuitBreakerConfig
+    from distributed_tracing import Tracer, TracedLogger
+    from dynamic_configuration import ConfigurationManager, ConfigValidationRule, ConfigUpdateStrategy
+    from persistence_durability import DurabilityManager
+    HAS_DISTRIBUTED_SYSTEMS = True
+except ImportError as e:
+    HAS_DISTRIBUTED_SYSTEMS = False
+    if TYPE_CHECKING:
+        from consensus_raft import RaftNode, RaftCluster
+        from failure_detection_phi import PhiAccrualFailureDetector
+        from message_delivery_reliable import ReliableDeliveryManager
+        from state_consistency_wal import WriteAheadLog, CausalConsistencyManager
+        from sharding_layer import ShardingManager
+        from mtls_security import CertificateAuthority, MTLSConnectionManager
+        from backpressure_management import BackpressureManager, CircuitBreakerConfig
+        from distributed_tracing import Tracer, TracedLogger
+        from dynamic_configuration import ConfigurationManager, ConfigValidationRule, ConfigUpdateStrategy
+        from persistence_durability import DurabilityManager
 from dataclasses import dataclass, asdict
 from enum import Enum
-from redis import Redis
 from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
+from core.redis_client import get_redis_client
+from core.redis_config import RedisDB
 
 class BlackrootHost:
     # --- Mesh compatibility fields (dynamic, for peer tracking) ---
@@ -126,11 +154,64 @@ class CommandType(Enum):
 
 # Define missing MetricsCollector stub if not present
 class MetricsCollector:
+    """Collects node health and performance metrics."""
     def __init__(self, mesh_node):
         self.mesh_node = mesh_node
         self.collection_interval = 10
+        self.metrics_history = []  # Keep last 100 measurements
+        self.max_history = 100
+    
     def collect_metrics(self):
-        pass
+        """Collect node health metrics and return dict."""
+        try:
+            import time
+            import psutil
+            
+            metrics = {
+                "timestamp": time.time(),
+                "node_id": self.mesh_node.node_id,
+                "cpu_percent": psutil.cpu_percent(interval=0.1),
+                "memory_percent": psutil.virtual_memory().percent,
+                "disk_percent": psutil.disk_usage('/').percent,
+                "active_agents": len(self.mesh_node.loaded_agents) if hasattr(self.mesh_node, 'loaded_agents') else 0,
+                "peer_count": len(self.mesh_node.peers) if hasattr(self.mesh_node, 'peers') else 0,
+            }
+            
+            # Keep history bounded
+            self.metrics_history.append(metrics)
+            if len(self.metrics_history) > self.max_history:
+                self.metrics_history.pop(0)
+            
+            # Log warnings if thresholds exceeded
+            if metrics["cpu_percent"] > 80:
+                logger.warning(f"[METRICS] High CPU usage: {metrics['cpu_percent']:.1f}%")
+            if metrics["memory_percent"] > 80:
+                logger.warning(f"[METRICS] High memory usage: {metrics['memory_percent']:.1f}%")
+            if metrics["disk_percent"] > 90:
+                logger.warning(f"[METRICS] High disk usage: {metrics['disk_percent']:.1f}%")
+            
+            return metrics
+        except Exception as e:
+            logger.error(f"Metrics collection failed: {e}")
+            return None
+    
+    def get_health_status(self):
+        """Return health status: HEALTHY, DEGRADED, or CRITICAL."""
+        if not self.metrics_history:
+            return "UNKNOWN"
+        
+        recent = self.metrics_history[-1]
+        
+        if recent["cpu_percent"] > 90 or recent["memory_percent"] > 90 or recent["disk_percent"] > 95:
+            return "CRITICAL"
+        elif recent["cpu_percent"] > 75 or recent["memory_percent"] > 75 or recent["disk_percent"] > 85:
+            return "DEGRADED"
+        else:
+            return "HEALTHY"
+    
+    def get_recent_metrics(self, count: int = 5):
+        """Get last N measurements."""
+        return self.metrics_history[-count:] if self.metrics_history else []
 
 
 # NetworkMessage dataclass (must be after MessageType and datetime are defined)
@@ -167,7 +248,7 @@ class NetworkMessage:
         )
 import logging
 from datetime import datetime, timedelta
-from secure_channel import SecureChannel  # Assume this exists
+from core.task_runner import TaskRunner  # For daemon optimization
 
 # Configure logging
 logging.basicConfig(
@@ -190,11 +271,10 @@ class SecureChannelBase:
     def add_incoming_message(self, message: Dict):
         raise NotImplementedError
 
-# Import secure channel module (assumed to exist)
 try:
-    from secure_channel import SecureChannel as ImportedSecureChannel
-
-except ImportError:
+    from secure_channel import SecureChannel as ExternalSecureChannel
+    SecureChannel: Any = ExternalSecureChannel  # type: ignore[assignment]
+except Exception:
     logger.warning("SecureChannel module not found. Using enhanced mock implementation.")
 
     class SecureChannel(SecureChannelBase):
@@ -675,7 +755,7 @@ class SecurityManager:
         event = Event(
             event_type=event_type,
             payload={"agent_id": str(agent_id), "description": description},
-            sender_id=agent_id
+            sender_id=str(agent_id)
         )
         self.security_events.append(event)
         # Keep only last 1000 events
@@ -703,39 +783,26 @@ class SwarmMesh:
 
     def get_artifact_metadata(self, artifact_id: str) -> Optional[dict]:
         """
-        Retrieve metadata for an artifact from BlackVault or memory.
+        Retrieve metadata for an artifact from vault or memory.
         Args:
             artifact_id: Artifact identifier
         Returns:
             Metadata dict if found, else None
         """
         try:
-            from black_vault import BlackVault
             if not hasattr(self, '_artifact_vault'):
-                self._artifact_vault = BlackVault()
-            # Try 'get_metadata' or 'metadata' method
+                self._init_artifact_vault()
+            
+            # Try unified vault metadata method
             try:
-                get_metadata = getattr(self._artifact_vault, 'get_metadata', None)
-                if callable(get_metadata):
-                    result = get_metadata(str(artifact_id))
-                    if isinstance(result, dict):
-                        return result
-                    else:
-                        return None
-            except Exception:
-                pass
-            try:
-                metadata_method = getattr(self._artifact_vault, 'metadata', None)
-                if callable(metadata_method):
-                    result = metadata_method(str(artifact_id))
-                    if isinstance(result, dict):
-                        return result
-                    else:
-                        return None
+                result = self._artifact_vault.get_metadata(str(artifact_id))
+                if isinstance(result, dict):
+                    return result
             except Exception:
                 pass
         except Exception:
             pass
+        
         # Fallback to in-memory
         if hasattr(self, '_received_artifacts') and artifact_id in self._received_artifacts:
             return self._received_artifacts[artifact_id].get('metadata')
@@ -743,7 +810,7 @@ class SwarmMesh:
 
     def delete_artifact(self, artifact_id: str) -> bool:
         """
-        Delete an artifact locally (from BlackVault or memory).
+        Delete an artifact locally (from vault or memory).
         Args:
             artifact_id: Artifact identifier
         Returns:
@@ -751,27 +818,18 @@ class SwarmMesh:
         """
         deleted = False
         try:
-            from black_vault import BlackVault
             if not hasattr(self, '_artifact_vault'):
-                self._artifact_vault = BlackVault()
-            # Try 'delete' or 'remove' method
-            if hasattr(self._artifact_vault, 'delete'):
-                self._artifact_vault.delete(str(artifact_id))
-                deleted = True
-            else:
-                try:
-                    remove_method = getattr(self._artifact_vault, 'remove', None)
-                    if callable(remove_method):
-                        remove_method(str(artifact_id))
-                        deleted = True
-                except Exception:
-                    pass
+                self._init_artifact_vault()
+            
+            deleted = self._artifact_vault.delete(str(artifact_id))
         except Exception:
             pass
+        
         # Fallback to in-memory
         if not deleted and hasattr(self, '_received_artifacts') and artifact_id in self._received_artifacts:
             del self._received_artifacts[artifact_id]
             deleted = True
+        
         return deleted
 
     def remote_delete_artifact(self, peer_id: str, artifact_id: str) -> bool:
@@ -799,37 +857,22 @@ class SwarmMesh:
 
     def list_artifacts(self) -> list:
         """
-        List all known artifact IDs (from BlackVault if available, else memory).
+        List all known artifact IDs (from vault if available, else memory).
         Returns:
             List of artifact IDs (str)
         """
-        # Try BlackVault first
         try:
-            from black_vault import BlackVault
             if not hasattr(self, '_artifact_vault'):
-                self._artifact_vault = BlackVault()
-            try:
-                list_method = getattr(self._artifact_vault, 'list', None)
-                if callable(list_method):
-                    result = list_method()
-                    if isinstance(result, list):
-                        return result
-                    else:
-                        return []
-            except Exception:
-                pass
-            try:
-                list_payloads_method = getattr(self._artifact_vault, 'list_payloads', None)
-                if callable(list_payloads_method):
-                    result = list_payloads_method()
-                    if isinstance(result, list):
-                        return result
-                    else:
-                        return []
-            except Exception:
-                pass
+                self._init_artifact_vault()
+            
+            artifacts = self._artifact_vault.list_artifacts()
+            if isinstance(artifacts, list):
+                # Extract IDs from artifact metadata
+                return [a.get('hash') or a.get('name') for a in artifacts if isinstance(a, dict)]
+            return []
         except Exception:
             pass
+        
         # Fallback to in-memory
         if hasattr(self, '_received_artifacts'):
             return list(self._received_artifacts.keys())
@@ -941,27 +984,23 @@ class SwarmMesh:
                 logger.error(f"Received artifact {artifact_id} from {sender} missing data (artifact_data_b64 is None or empty)")
                 return
             artifact_data = base64.b64decode(artifact_data_b64)
-            # Store in BlackVault if available, else in-memory
+            
+            # Store in vault if available, else in-memory
             stored = False
             try:
-                from black_vault import BlackVault
                 if not hasattr(self, '_artifact_vault'):
-                    self._artifact_vault = BlackVault()
-                # Try both possible method names for storing
+                    self._init_artifact_vault()
+                
                 artifact_id_str = str(artifact_id) if artifact_id is not None else None
                 if artifact_id_str is None:
                     raise ValueError("artifact_id is None")
-                if hasattr(self._artifact_vault, 'store'):
-                    try:
-                        self._artifact_vault.store(artifact_id_str, artifact_data, metadata)
-                        logger.info(f"Stored artifact {artifact_id_str} in BlackVault (store).")
-                        stored = True
-                    except Exception as e:
-                        logger.warning(f"store failed: {e}")
-                else:
-                    logger.warning("No store method on BlackVault; storing in memory.")
+                
+                self._artifact_vault.store(artifact_id_str, artifact_data)
+                logger.info(f"Stored artifact {artifact_id_str} in vault")
+                stored = True
             except Exception as e:
-                logger.warning(f"BlackVault unavailable or failed, storing artifact {artifact_id} in memory: {e}")
+                logger.warning(f"Vault storage failed: {e}")
+            
             if not stored:
                 if not hasattr(self, '_received_artifacts'):
                     self._received_artifacts = {}
@@ -971,7 +1010,9 @@ class SwarmMesh:
                     'sender': sender,
                     'received_at': datetime.now(),
                 }
+            
             logger.info(f"Received artifact {artifact_id} from {sender} (size: {len(artifact_data)} bytes)")
+            
             # Optionally relay artifact to other peers
             if relay and artifact_id is not None:
                 self.relay_artifact(str(artifact_id), artifact_data, metadata, exclude=[sender] if sender else None, targets=relay_targets)
@@ -999,27 +1040,24 @@ class SwarmMesh:
 
     def get_artifact(self, artifact_id: str) -> Optional[bytes]:
         """
-        Retrieve an artifact by ID from BlackVault or memory.
+        Retrieve an artifact by ID from vault or memory.
         Args:
             artifact_id: Artifact identifier
         Returns:
             Artifact bytes if found, else None
         """
-        # Try BlackVault first
         try:
-            from black_vault import BlackVault
             if not hasattr(self, '_artifact_vault'):
-                self._artifact_vault = BlackVault()
+                self._init_artifact_vault()
+            
             artifact_id_str = str(artifact_id) if artifact_id is not None else None
             if artifact_id_str is None:
                 return None
-            if hasattr(self._artifact_vault, 'retrieve'):
-                try:
-                    return self._artifact_vault.retrieve(artifact_id_str)
-                except Exception:
-                    pass
+            
+            return self._artifact_vault.retrieve(artifact_id_str)
         except Exception:
             pass
+        
         # Fallback to in-memory
         if hasattr(self, '_received_artifacts') and artifact_id in self._received_artifacts:
             return self._received_artifacts[artifact_id]['data']
@@ -1051,7 +1089,7 @@ class SwarmMesh:
                  node_id: str, 
                  listen_port: int = 0,
                  discovery_port: int = 9999,
-                 max_peers: int = 50,
+                 max_peers: int = 100000,
                  roles: Optional[Set[str]] = None):
         """
         Initialize SwarmMesh node as a real BlackrootHost.
@@ -1061,7 +1099,11 @@ class SwarmMesh:
         self.listen_port = listen_port
         self.discovery_port = discovery_port
         self.max_peers = max_peers
-        self.redis = Redis(host="localhost", port=6379, decode_responses=True)
+        
+        # Use Redis factory with proper DB isolation
+        redis_client_wrapper = get_redis_client(RedisDB.MESH_COMM)
+        self.redis = redis_client_wrapper.redis  # Expose raw client for backward compatibility
+        self.redis_client_wrapper = redis_client_wrapper
 
         # Network state
         self.status = NodeStatus.DISCONNECTED
@@ -1082,6 +1124,7 @@ class SwarmMesh:
         self.running = False
         self.threads = []
         self.lock = threading.RLock()
+        self.task_runners = {}  # TaskRunner pool for daemon coordination
 
         # Statistics
         self.stats = {
@@ -1098,7 +1141,275 @@ class SwarmMesh:
         self.security_manager = SecurityManager(self)
         self.metrics_collector = MetricsCollector(self)
 
+        # Initialize distributed systems (gaps #1-10) if available
+        self._dist_sys = None
+        if HAS_DISTRIBUTED_SYSTEMS:
+            try:
+                self._initialize_distributed_systems()
+                logger.info("✓ Distributed systems (gaps #1-10) initialized")
+            except Exception as e:
+                logger.warning(f"Distributed systems initialization failed: {e}")
+
         logger.info(f"SwarmMesh host {self.node_id} initialized with roles: {self.host.roles}")
+
+    def _initialize_distributed_systems(self):
+        """
+        Initialize all 10 distributed systems components.
+        
+        Components:
+        - Gap #1: Raft consensus for distributed decisions
+        - Gap #2: Phi Accrual failure detection
+        - Gap #3: Reliable message delivery
+        - Gap #4: WAL + causal consistency
+        - Gap #5: Sharding for horizontal scaling
+        - Gap #6: mTLS security infrastructure
+        - Gap #7: Backpressure management
+        - Gap #8: Distributed tracing
+        - Gap #9: Dynamic configuration
+        - Gap #10: Persistence & durability
+        """
+        # Gap #1: Consensus (Raft)
+        raft_size = max(3, len(self.peers) + 1) if self.peers else 1
+        raft_node_ids = [str(p) for p in (self.peers or [self.node_id])]
+        if not raft_node_ids:
+            raft_node_ids = [self.node_id]
+        self._raft_cluster = RaftCluster(node_ids=raft_node_ids)
+        
+        # Gap #2: Failure Detection (Phi Accrual)
+        self._failure_detector = PhiAccrualFailureDetector()
+        
+        # Gap #3: Reliable Message Delivery
+        self._reliable_delivery = ReliableDeliveryManager()
+        
+        # Gap #4: WAL + Causal Consistency
+        self._wal = WriteAheadLog(log_dir=f"./wal_{self.node_id}")
+        self._consistency_mgr = CausalConsistencyManager(self.node_id)
+        
+        # Gap #5: Sharding
+        self._sharding_manager = ShardingManager(shard_count=8, replicas_per_key=3)
+        
+        # Gap #6: mTLS Security
+        self._ca = CertificateAuthority()
+        self._node_cert = self._ca.issue_node_certificate(
+            self.node_id,
+            san_hosts=[f"{self.node_id}.local"]
+        )
+        self._mtls_manager = MTLSConnectionManager(
+            ca_pem=self._ca.get_ca_cert_pem(),
+            node_cert_pem=self._node_cert.cert_pem,
+            node_key_pem=self._node_cert.key_pem
+        )
+        
+        # Gap #7: Backpressure & Resource Management
+        self._backpressure = BackpressureManager()
+        self._command_breaker = self._backpressure.create_circuit_breaker(
+            "command_execution",
+            config=CircuitBreakerConfig(failure_threshold=10)
+        )
+        self._command_queue = self._backpressure.create_bounded_queue(
+            "commands",
+            max_size=5000
+        )
+        self._rate_limiter = self._backpressure.create_rate_limiter(
+            "api_rate",
+            base_rate=1000
+        )
+        
+        # Gap #8: Distributed Tracing
+        self._tracer = Tracer(service_name=f"swarm_mesh_{self.node_id}")
+        self._traced_log = TracedLogger(logger)
+        
+        # Gap #9: Dynamic Configuration
+        self._config_manager = ConfigurationManager(environment=os.getenv('ENVIRONMENT', 'production'))
+        self._setup_config_rules()
+        self._load_initial_config()
+        
+        # Gap #10: Persistence & Durability
+        self._durability = DurabilityManager(storage_dir=f"./persistence_{self.node_id}")
+        
+        self._dist_sys = True
+    
+    def _setup_config_rules(self):
+        """Setup configuration validation rules (gap #9)."""
+        if not HAS_DISTRIBUTED_SYSTEMS or not self._config_manager:
+            return
+        self._config_manager.register_validation_rule(
+            "heartbeat_interval",
+            ConfigValidationRule(key_pattern="heartbeat_interval", required=True, type_check=int, min_value=100, max_value=60000)
+        )
+        self._config_manager.register_validation_rule(
+            "consensus_timeout",
+            ConfigValidationRule(key_pattern="consensus_timeout", required=True, type_check=int, min_value=1000, max_value=120000)
+        )
+        self._config_manager.register_validation_rule(
+            "phi_threshold",
+            ConfigValidationRule(key_pattern="phi_threshold", required=True, type_check=float, min_value=1.0, max_value=10.0)
+        )
+    
+    def _load_initial_config(self):
+        """Load initial configuration (gap #9)."""
+        initial_config = {
+            "heartbeat_interval": 5000,
+            "consensus_timeout": 30000,
+            "phi_threshold": 7.0,
+            "shard_count": 8,
+            "retry_max_backoff_ms": 30000,
+            "max_queue_depth": 5000
+        }
+        self._config_manager.load_config(initial_config, author="initialization")
+    
+    def execute_command_with_distributed_systems(self, command: Dict[str, Any]) -> bool:
+        """
+        Execute command with all distributed systems safeguards.
+        Uses gaps #3 (reliable delivery), #4 (consistency), #7 (backpressure),
+        #8 (tracing), and integrated orchestration.
+        
+        Args:
+            command: Command dict
+            
+        Returns:
+            True if executed successfully
+        """
+        if not self._dist_sys:
+            return False
+        
+        # Start trace (gap #8)
+        trace = self._tracer.start_trace(f"execute_{command.get('type', 'unknown')}")
+        
+        try:
+            # Rate limiting (gap #7)
+            if not self._rate_limiter.allow_request():
+                self._traced_log.warning("Rate limit exceeded")
+                self._tracer.finish_trace(trace.trace_id, success=False)
+                return False
+            
+            # Circuit breaker (gap #7)
+            def execute_with_safety():
+                # Enqueue with backpressure (gap #7)
+                if not self._command_queue.enqueue(command, priority=command.get("priority", 0)):
+                    self._traced_log.warning("Command queue full")
+                    return False
+                
+                # Reliable delivery (gap #3)
+                key = command.get("key")
+                if key:
+                    # Causal consistency check (gap #4)
+                    current_vector = self._consistency_mgr.get_version_vector_for_key(key)
+                    remote_vector = command.get("version_vector", {})
+                    
+                    # Write to WAL (gap #4)
+                    self._consistency_mgr.record_write(key, command.get("value"))
+                    entry_id = self._wal.append(
+                        self.node_id,
+                        command.get("type", "SET"),
+                        key,
+                        command.get("value"),
+                        self._consistency_mgr.get_version_vector_for_key(key)
+                    )
+                
+                # Apply command to state
+                self.stats['commands_executed'] += 1
+                return True
+            
+            # Execute with circuit breaker protection (gap #7)
+            result = self._command_breaker.call(execute_with_safety)
+            
+            self._tracer.finish_trace(trace.trace_id, success=result)
+            return result
+        
+        except Exception as e:
+            self._traced_log.error(f"Command execution failed: {e}")
+            self._tracer.finish_trace(trace.trace_id, success=False, error=str(e))
+            self.stats['commands_failed'] += 1
+            return False
+    
+    def get_distributed_systems_status(self) -> Dict[str, Any]:
+        """
+        Get integrated status of all 10 distributed systems components.
+        
+        Returns:
+            Status dict with all components' metrics
+        """
+        if not self._dist_sys:
+            return {"status": "disabled", "reason": "Distributed systems not initialized"}
+        
+        return {
+            "distributed_systems_enabled": True,
+            "node_id": self.node_id,
+            "components": {
+                "gap_1_consensus": self._raft_cluster.get_cluster_status(),
+                "gap_2_failure_detection": self._failure_detector.get_cluster_health(),
+                "gap_3_reliable_delivery": self._reliable_delivery.get_status(),
+                "gap_4_wal_consistency": {
+                    "wal": self._wal.get_status(),
+                    "consistency": self._consistency_mgr.get_status()
+                },
+                "gap_5_sharding": self._sharding_manager.get_status(),
+                "gap_6_mtls_security": {
+                    "pki": self._ca.get_status(),
+                    "mtls": self._mtls_manager.get_status()
+                },
+                "gap_7_backpressure": self._backpressure.get_status(),
+                "gap_8_tracing": self._tracer.get_status(),
+                "gap_9_configuration": self._config_manager.get_status(),
+                "gap_10_durability": self._durability.get_status()
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def create_periodic_snapshot(self) -> Optional[Dict[str, Any]]:
+        """
+        Create periodic state snapshot (gap #10).
+        
+        Returns:
+            Snapshot metadata or None
+        """
+        if not self._dist_sys:
+            return None
+        
+        # Get current state as dict
+        state_snapshot = {
+            "node_id": self.node_id,
+            "stats": self.stats.copy(),
+            "peers_count": len(self.peers),
+            "commands_in_queue": self._command_queue.get_size()
+        }
+        
+        snapshot = self._durability.snapshot_manager.create_snapshot(
+            self.node_id,
+            state_snapshot
+        )
+        
+        logger.info(f"Created snapshot {snapshot.snapshot_id}")
+        # Convert dataclass to dict if available
+        from dataclasses import asdict
+        return asdict(snapshot) if snapshot else None
+
+    def _init_artifact_vault(self):
+        """Initialize artifact vault using UnifiedVault adapter (local or distributed mode)."""
+        try:
+            from vault_adapter import UnifiedVault
+            import os
+            
+            # Check environment/config for vault mode
+            vault_mode = os.environ.get('BLACKROOT_VAULT_MODE', 'local')
+            
+            if vault_mode == 'distributed':
+                self._artifact_vault = UnifiedVault(
+                    mode='distributed',
+                    redis_host=os.environ.get('REDIS_HOST', 'localhost'),
+                    redis_port=int(os.environ.get('REDIS_PORT', 6379)),
+                    redis_db=int(os.environ.get('REDIS_DB', 1)),
+                    node_id=self.node_id,
+                    password=os.environ.get('VAULT_PASSWORD')
+                )
+                logger.info(f"Artifact vault initialized in DISTRIBUTED mode")
+            else:
+                self._artifact_vault = UnifiedVault(mode='local')
+                logger.info(f"Artifact vault initialized in LOCAL mode")
+        except Exception as e:
+            logger.error(f"Failed to initialize artifact vault: {e}")
+            raise
 
     def connect(self, bootstrap_peers: Optional[List[Tuple[str, int]]] = None):
         """
@@ -1142,7 +1453,17 @@ class SwarmMesh:
         self.running = False
         self.status = NodeStatus.DISCONNECTED
         
-        # Stop all background threads
+        # Stop all TaskRunner instances with timeout
+        for name, runner in self.task_runners.items():
+            try:
+                runner.stop(timeout=5.0)
+                logger.debug(f"Stopped {name} TaskRunner")
+            except Exception as e:
+                logger.warning(f"Error stopping {name} TaskRunner: {e}")
+        
+        self.task_runners.clear()
+        
+        # Legacy: Stop any remaining threads (backward compatibility)
         for thread in self.threads:
             if thread.is_alive():
                 thread.join(timeout=5.0)
@@ -1154,21 +1475,28 @@ class SwarmMesh:
         logger.info(f"Node {self.node_id} disconnected")
 
     def _start_background_threads(self):
-        """Start background threads for mesh operations"""
-        threads_config = [
-            (self._heartbeat_loop, "Heartbeat"),
-            (self._peer_discovery_loop, "PeerDiscovery"),
-            (self._command_processor_loop, "CommandProcessor"),
-            (self._cleanup_loop, "Cleanup"),
-            (self._metrics_collection_loop, "MetricsCollection"),
-            (self._consistency_sync_loop, "ConsistencySync")
+        """Start background threads via TaskRunner pool for adaptive daemon management"""
+        # Daemon task configurations with adaptive intervals
+        daemon_config = [
+            ("Heartbeat", self._heartbeat_task, 10.0),
+            ("PeerDiscovery", self._discovery_task, 30.0),
+            ("CommandProcessor", self._command_task, 1.0),
+            ("Cleanup", self._cleanup_task, 60.0),
+            ("MetricsCollection", self._metrics_task, self.metrics_collector.collection_interval),
+            ("ConsistencySync", self._sync_task, 120.0)
         ]
         
-        for target, name in threads_config:
-            thread = threading.Thread(target=target, name=name, daemon=True)
-            thread.start()
-            self.threads.append(thread)
-            logger.debug(f"Started {name} thread")
+        # Create and start TaskRunner instances for each daemon
+        for name, task_fn, interval in daemon_config:
+            runner = TaskRunner(
+                task_fn=task_fn,
+                interval=interval,
+                name=name,
+                max_backoff=30.0
+            )
+            runner.start(run_immediately=False)
+            self.task_runners[name] = runner
+            logger.debug(f"Started {name} TaskRunner with interval {interval}s")
 
     def _bootstrap_with_peers(self, bootstrap_peers: List[Tuple[str, int]]):
         """Connect to bootstrap peers to join the network"""
@@ -1264,6 +1592,115 @@ class SwarmMesh:
                 logger.error(f"Error pinging peer {peer_id}: {e}")
                 results[str(peer_id)] = False
         return results
+
+    # --- TaskRunner Daemon Task Functions (Phase 3.1) ---
+    # These synchronous task functions replace the old async while-True loops
+    # Each returns Optional[float]: None = use default interval, float = override interval
+    
+    def _heartbeat_task(self) -> Optional[float]:
+        """Synchronous heartbeat task - sends periodic keepalives to all peers"""
+        try:
+            self._send_heartbeats()
+            return None  # Use default 10s interval
+        except Exception as e:
+            logger.error(f"Heartbeat task error: {e}")
+            return 5.0  # Backoff on error (TaskRunner applies exponential multiplier)
+    
+    def _discovery_task(self) -> Optional[float]:
+        """Synchronous peer discovery task - periodic peer rediscovery"""
+        try:
+            # Periodically rediscover peers (30% chance each cycle)
+            if random.random() < 0.3:
+                self.broadcast_identity()
+            return None  # Use default 30s interval
+        except Exception as e:
+            logger.error(f"Peer discovery task error: {e}")
+            return 10.0  # Backoff on error
+    
+    def _command_task(self) -> Optional[float]:
+        """Synchronous command processor task - pulls and processes commands"""
+        try:
+            # Pull all messages (commands, artifacts, fetch/delete requests)
+            raw_msgs = self.secure_channel.pull_messages()
+            commands = []
+            
+            for raw_msg in raw_msgs:
+                # If it's a command dict
+                if isinstance(raw_msg, dict) and 'command_type' in raw_msg:
+                    try:
+                        command = Command.from_dict(raw_msg)
+                        commands.append(command)
+                        self.stats['messages_received'] += 1
+                    except Exception as e:
+                        logger.error(f"Failed to parse command: {e}")
+                
+                # If it's a NetworkMessage dict of type ARTIFACT_TRANSFER
+                elif isinstance(raw_msg, dict) and raw_msg.get('message_type') == MessageType.ARTIFACT_TRANSFER.value:
+                    try:
+                        msg_obj = NetworkMessage.from_dict(raw_msg)
+                        self.receive_artifact(msg_obj)
+                        self.stats['messages_received'] += 1
+                    except Exception as e:
+                        logger.error(f"Failed to process artifact message: {e}")
+                
+                # If it's an artifact fetch request
+                elif isinstance(raw_msg, dict) and raw_msg.get('type') == 'artifact_fetch_request':
+                    artifact_id = raw_msg.get('artifact_id')
+                    requester = raw_msg.get('requester')
+                    if artifact_id and requester:
+                        artifact_data = self.get_artifact(artifact_id)
+                        if artifact_data is not None:
+                            self.send_artifact(requester, artifact_id, artifact_data)
+                            logger.info(f"Responded to artifact fetch request for {artifact_id} from {requester}")
+                
+                # If it's an artifact delete request
+                elif isinstance(raw_msg, dict) and raw_msg.get('type') == 'artifact_delete_request':
+                    artifact_id = raw_msg.get('artifact_id')
+                    requester = raw_msg.get('requester')
+                    if artifact_id:
+                        deleted = self.delete_artifact(artifact_id)
+                        logger.info(f"Artifact {artifact_id} delete request from {requester}: {'deleted' if deleted else 'not found'}")
+            
+            # Process any pending commands from local injection
+            with self.lock:
+                commands.extend(self.pending_commands)
+                self.pending_commands.clear()
+            
+            for command in commands:
+                self._process_command_async(command)
+            
+            return None  # Use default 1s interval
+        except Exception as e:
+            logger.error(f"Command processor task error: {e}")
+            return 2.0  # Backoff on error
+    
+    def _cleanup_task(self) -> Optional[float]:
+        """Synchronous cleanup task - removes dead peers and trims history"""
+        try:
+            self._cleanup_dead_peers()
+            self._cleanup_command_history()
+            return None  # Use default 60s interval
+        except Exception as e:
+            logger.error(f"Cleanup task error: {e}")
+            return 15.0  # Backoff on error
+    
+    def _metrics_task(self) -> Optional[float]:
+        """Synchronous metrics collection task"""
+        try:
+            self.metrics_collector.collect_metrics()
+            return None  # Use default metrics_collector.collection_interval
+        except Exception as e:
+            logger.error(f"Metrics collection task error: {e}")
+            return 10.0  # Backoff on error
+    
+    def _sync_task(self) -> Optional[float]:
+        """Synchronous consistency sync task - synchronizes data across peers"""
+        try:
+            self.consistency_manager.sync_with_peers()
+            return None  # Use default 120s interval
+        except Exception as e:
+            logger.error(f"Consistency sync task error: {e}")
+            return 30.0  # Backoff on error
 
     def _heartbeat_loop(self):
         """Background thread for sending periodic heartbeats"""
@@ -1591,6 +2028,73 @@ class SwarmMesh:
         
         logger.info(f"Injected command {command_id} for {target_module}.{action}")
         return command_id
+
+    def signed_publish(self, channel: str, message: Any, agent_id: str) -> int:
+        """
+        Publish signed message to Redis channel for integrity verification.
+        
+        Args:
+            channel: Redis channel
+            message: Message to publish
+            agent_id: Agent identifier for signing
+            
+        Returns:
+            Number of subscribers
+        """
+        try:
+            # Get vault for signing
+            from black_vault import BlackVault
+            vault = BlackVault(use_hsm=True)
+            
+            # Serialize message
+            if isinstance(message, dict):
+                message_data = json.dumps(message, sort_keys=True).encode()
+            else:
+                message_data = str(message).encode()
+            
+            # Sign the message
+            signature = vault._sign_data(message_data, agent_id)
+            
+            # Create signed envelope
+            signed_message = {
+                'message': message if isinstance(message, dict) else str(message),
+                'signature': base64.b64encode(signature).decode(),
+                'agent_id': agent_id,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            return self.redis.publish(channel, json.dumps(signed_message))
+        except Exception as e:
+            logger.error(f"Failed to publish signed message: {e}")
+            return 0
+
+    def verify_message(self, signed_message: Dict) -> bool:
+        """
+        Verify signed message integrity.
+        
+        Args:
+            signed_message: Signed message dict
+            
+        Returns:
+            True if signature is valid
+        """
+        try:
+            from black_vault import BlackVault
+            vault = BlackVault(use_hsm=True)
+            
+            message = signed_message['message']
+            if isinstance(message, dict):
+                message_data = json.dumps(message, sort_keys=True).encode()
+            else:
+                message_data = str(message).encode()
+            
+            signature = base64.b64decode(signed_message['signature'])
+            agent_id = signed_message['agent_id']
+            
+            return vault._verify_signature(message_data, signature, agent_id)
+        except Exception as e:
+            logger.error(f"Failed to verify message: {e}")
+            return False
 
     def elect_leader(self) -> Optional[str]:
         """

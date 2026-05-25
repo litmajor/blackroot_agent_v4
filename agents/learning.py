@@ -7,24 +7,61 @@ log = logging.getLogger("LEARN-MIND")
 
 
 class LearningAgent(BaseAgent):
+    def should_activate(self, config):
+        return self.codename in config.get("agent_whitelist", [])
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__("LEARN-MIND")
         cfg = cfg or {}
-        self.window_minutes = cfg.get("window_minutes", 60)
-        self.threshold = cfg.get("threshold", 5)
-        self.interval = cfg.get("interval", 60)
+        self.window_minutes = int(cfg.get("window_minutes", 60))
+        self.threshold = int(cfg.get("threshold", 5))
+        self.interval = int(cfg.get("interval", 60))
         self.stats: Dict[str, int] = {}
         self.last_log = datetime.utcnow()
+        # Economic Layer: Wallet registration
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+            self.accountant.register_agent(str(self.codename), Decimal('80'))  # Initial budget
+        except Exception as e:
+            self.accountant = None
+            log.error(f"Failed to initialize accountant for LearningAgent: {e}")
+
+    def _deduct_learning_cost(self):
+        """Deduct Root for learning operation (0.3 Root per learning cycle)."""
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.process_agent_spend(str(self.codename), Decimal('0.3'), "Learning cost")
+
+    def _reward_learning_success(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.codename)].balance += Decimal('0.6')
+            self.accountant.treasury_balance -= Decimal('0.6')
+            log.info(f"Rewarded 0.6 Root to LearningAgent for successful learning.")
+
+    def _burn_on_learning_failure(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('0.45')
+            self.accountant.agent_wallets[str(self.codename)].balance -= penalty
+            log.info(f"Burned 0.45 Root from LearningAgent for failed learning.")
 
     # ------------------------------------------------------------------
     def run(self):
         super().run()
         log.info("Learning loop started (window %s min, threshold %s)", self.window_minutes, self.threshold)
         while True:
-            logs = self._fetch_logs()
-            if logs:
-                self._analyze(logs)
-                self._adapt()
+            self._deduct_learning_cost()
+            try:
+                logs = self._fetch_logs()
+                if logs:
+                    self._analyze(logs)
+                    self._adapt()
+                self._reward_learning_success()
+            except Exception as e:
+                self._burn_on_learning_failure()
+                log.warning(f"Learning cycle failed: {e}")
             time.sleep(self.interval)
 
     # ------------------------------------------------------------------
@@ -44,7 +81,17 @@ class LearningAgent(BaseAgent):
         self.stats.clear()
         for entry in logs:
             ts = entry.get("timestamp")
-            if ts and datetime.fromisoformat(ts) < cutoff:
+            # Defensive: handle both ISO and float timestamps
+            dt = None
+            if ts:
+                try:
+                    if isinstance(ts, str):
+                        dt = datetime.fromisoformat(ts)
+                    else:
+                        dt = datetime.utcfromtimestamp(float(ts))
+                except Exception:
+                    dt = None
+            if dt and dt < cutoff:
                 continue
             atype = entry.get("anomaly_class", {}).get("type")
             if atype:

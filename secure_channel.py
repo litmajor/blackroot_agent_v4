@@ -2,12 +2,28 @@ import json
 import time
 import base64
 import threading
-import redis
 from typing import List, Dict
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from Crypto.Util.Padding import pad, unpad
+
+# Guard optional crypto imports (pycryptodome)
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Random import get_random_bytes
+    from Crypto.Util.Padding import pad, unpad
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    # Stub implementations
+    AES = None
+    get_random_bytes = lambda size: b'\x00' * size
+    def pad(data, blocksize):
+        return data
+    def unpad(data, blocksize):
+        return data
+
 import queue
+
+from core.redis_client import get_redis_client
+from core.redis_config import RedisDB, RedisKeyPrefix
 
 class SecureChannel:
     def send_message(self, target: str, message: Dict) -> bool:
@@ -24,7 +40,12 @@ class SecureChannel:
         self.shared_key = self._derive_key("blackroot_mesh_secret")
         self.inbox = queue.Queue()
         self.history = []
-        self.redis = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        
+        # Use Redis factory with SECURE_CHANNEL DB isolation
+        redis_client_wrapper = get_redis_client(RedisDB.SECURE_CHANNEL)
+        self.redis = redis_client_wrapper.redis  # Expose raw client for backward compatibility
+        self.redis_client_wrapper = redis_client_wrapper
+        
         self.channel = f"secure_channel:{self.node_id}"
         self.discovery_channel = "blackroot:discovery"
         self._start_listener()
@@ -35,6 +56,11 @@ class SecureChannel:
         return pad(passphrase.encode(), 16)[:16]  # AES-128
 
     def encrypt(self, data: Dict) -> str:
+        """Encrypt message data (requires Crypto library)."""
+        if not CRYPTO_AVAILABLE:
+            # Fallback: base64 encode only (no real encryption)
+            return base64.b64encode(json.dumps(data).encode()).decode()
+        
         raw = json.dumps(data).encode()
         iv = get_random_bytes(16)
         cipher = AES.new(self.shared_key, AES.MODE_CBC, iv)
@@ -42,6 +68,14 @@ class SecureChannel:
         return base64.b64encode(iv + ct).decode()
 
     def decrypt(self, encrypted: str) -> Dict:
+        """Decrypt message data (requires Crypto library)."""
+        if not CRYPTO_AVAILABLE:
+            # Fallback: base64 decode only (no real decryption)
+            try:
+                return json.loads(base64.b64decode(encrypted.encode()).decode())
+            except Exception:
+                return {}
+        
         blob = base64.b64decode(encrypted.encode())
         iv = blob[:16]
         ct = blob[16:]

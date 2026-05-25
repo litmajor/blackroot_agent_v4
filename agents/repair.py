@@ -368,9 +368,38 @@ class RepairAgent:
             RepairType.MEMORY_REPAIR: True,
             RepairType.CONFIGURATION_FIX: False
         }
+        # Economic Layer: Wallet registration
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+            self.accountant.register_agent(str(self.id), Decimal('150'))  # Initial budget
+        except Exception as e:
+            self.accountant = None
+            logging.error(f"Failed to initialize accountant for {self.id}: {e}")
         # Initialize repair strategies
         self._initialize_strategies()
         logging.info(f"Repair Agent {str(self.id)[:16]} initialized with {len(self.node_registry)} nodes under care")
+
+    def _deduct_repair_cost(self):
+        """Deduct Root for performing a repair (1 Root per repair)."""
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.process_agent_spend(str(self.id), Decimal('1'), "Repair cost")
+
+    def _reward_successful_repair(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            self.accountant.agent_wallets[str(self.id)].balance += Decimal('2')
+            self.accountant.treasury_balance -= Decimal('2')
+            logging.info(f"Rewarded 2 Root to {self.id} for successful repair.")
+
+    def _burn_on_failed_repair(self):
+        if hasattr(self, 'accountant') and self.accountant:
+            from decimal import Decimal
+            penalty = Decimal('1.5')
+            self.accountant.agent_wallets[str(self.id)].balance -= penalty
+            logging.info(f"Burned 1.5 Root from {self.id} for failed repair.")
     
     def _initialize_strategies(self):
         """Initialize all repair strategies"""
@@ -513,6 +542,8 @@ class RepairAgent:
             # Create backup if required
             if ticket.backup_required:
                 await self._create_node_backup(ticket.node_id)
+            # Economic: Deduct repair cost
+            self._deduct_repair_cost()
             # Find and execute appropriate strategy
             strategy = await self._find_repair_strategy(ticket)
             if not strategy:
@@ -535,9 +566,13 @@ class RepairAgent:
                 if ticket.node_id in self.node_registry:
                     self.node_registry[ticket.node_id]['health'] = NodeHealth.HEALTHY
                     self.node_registry[ticket.node_id]['last_repaired'] = datetime.now()
+                # Economic: Reward for successful repair
+                self._reward_successful_repair()
             else:
                 logging.error(f"Repair {ticket.id} failed")
                 ticket.attempts += 1
+                # Economic: Penalty for failed repair
+                self._burn_on_failed_repair()
                 if ticket.attempts < ticket.max_attempts:
                     # Retry repair
                     logging.info(f"Retrying repair {ticket.id} (attempt {ticket.attempts + 1})")
@@ -551,6 +586,8 @@ class RepairAgent:
         except asyncio.TimeoutError:
             logging.error(f"Repair {ticket.id} timed out")
             ticket.attempts += 1
+            # Economic: Penalty for failed repair
+            self._burn_on_failed_repair()
             if ticket.attempts < ticket.max_attempts:
                 self.repair_queue.append(ticket)
         except Exception as e:

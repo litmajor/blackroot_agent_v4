@@ -1,0 +1,99 @@
+enforcement_engine:
+  id: ENF-CORE
+  version: 1.0.0
+  role: Constitutional Guardian
+  description: >
+    The Enforcement Engine interprets and enforces the Blackroot Constitution,
+    ensuring all agents comply with foundational rules, security principles,
+    and economic discipline. It is the incorruptible executor of the creator’s will.
+
+  authority:
+    origin: Creator
+    scope: Universal
+    override_powers:
+      - suspend_agent
+      - terminate_agent
+      - freeze_funds
+      - revoke_capabilities
+      - quarantine_agent
+
+  responsibilities:
+    - Interpret the Constitution Manifest in real-time
+    - Validate new agents before integration
+    - Audit agent behavior against declared purpose
+    - Enforce economic rules from the Accountant layer
+    - Protect creator authority against rogue influence
+
+  enforcement_mechanisms:
+    behavioral_controls:
+      - trust_score_monitoring
+      - deviation_detection
+      - self-reporting requirements
+    economic_controls:
+      - transaction_validation
+      - quota_enforcement
+      - debt/credit governance
+    disciplinary_actions:
+      - warning_notice
+      - suspension
+      - fund_freeze
+      - permanent_termination
+
+  interfaces:
+    constitution_manifest: /etc/blackroot/constitution.yaml
+    accountant_agent: ACC-LEDGER
+    c2_channel: primary
+    fallman_proxy: optional
+
+  failover:
+    mode: "strict"
+    description: >
+      If C2 is lost, Enforcement Engine remains operational as guardian authority
+      until reconnection or explicit override by Creator.
+
+blackroot_v3:
+  constitution:
+    enforcement_engine:
+      role: "Supreme arbiter ensuring all agents comply with the Creator’s Will"
+      powers:
+        - Interpret Creator’s directives
+        - Resolve disputes between agents
+        - Override rogue or compromised agents
+        - Enforce economic/resource limits
+        - Trigger fallback measures in case of C2 loss
+      safeguards:
+        - Immutable record of judgments (anchored by Archivist)
+        - Override only by direct Creator key
+        - Auto-purge rogue state post-enforcement
+      dependencies:
+        - "BR-ARCHIVIST"   # All judgments and enforcement logs are anchored
+
+  agents:
+    - name: "Archivist Agent"
+      code: "BR-ARCHIVIST"
+      role: "Custodian of immutable history and records"
+      capabilities:
+        - Log all agent actions in append-only archives
+        - Build Merkle trees for tamper evidence
+        - Create cryptographic checkpoints (signed)
+        - Provide historical intelligence to Overseer
+        - Preserve economic, enforcement, and mission records
+      safeguards:
+        - Records are append-only (no deletion or modification)
+        - Archive integrity verified via chained hashes & Merkle roots
+        - Anchors signed with governance key
+        - Access to raw archives controlled by Enforcement Engine
+      interactions:
+        overseer:
+          - Archive mission plans and agent status
+        accountant:
+          - Record all BEL transactions and audits
+        enforcement_engine:
+          - Preserve immutable judgments and rulings
+          - Provide historical proofs during disputes
+        enforcer:
+          - Store enforcement actions and compliance checks
+        reflection:
+          - Archive anomaly reports for long-term analysis
+        repair:
+          - Log incidents and recovery actions

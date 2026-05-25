@@ -10,6 +10,8 @@ import time
 from datetime import datetime
 import threading
 
+MAX_CATEGORIES = 20
+
 # ---------- JSON encoder ----------
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, o):
@@ -17,13 +19,15 @@ class DateTimeEncoder(json.JSONEncoder):
             return o.isoformat()
         return super().default(o)
 
-# === Runtime Registration Hook ===
-try:
-    from kernel.core import register_module
-    from anomaly_classifier import AnomalyClassifierDaemon
-    print("[🔗] AnomalyClassifier auto-deployed into Blackroot runtime.")
-except ImportError:
-    print("[⚠️] Blackroot core runtime not found. Standalone mode engaged.")
+# === Runtime Registration Hook (Deferred) ===
+# Avoid circular imports - register_module will be called from kernel after initialization
+def register_with_kernel():
+    """Register this module with kernel when called (avoids circular imports)"""
+    try:
+        from kernel.core import register_module
+        register_module("anomaly_classifier", lambda: AnomalyClassifierDaemon())
+    except ImportError:
+        pass  # Standalone mode
 
 # === Swarm Integration Stub ===
 class SwarmAnomalySync:
@@ -54,14 +58,14 @@ class SwarmAnomalySync:
                 if k not in self.classifier.history:
                     self.classifier.history[k] = v
                 else:
-                    self.classifier.history[k].extend(v)
-                    self.classifier.history[k] = self.classifier.history[k][-50:]
+                    combined = (self.classifier.history[k] + v)[-50:]
+                    self.classifier.history[k] = combined
             print("[🔁] Anomaly profile synchronized from peer.")
         except Exception as e:
             print(f"[!] Sync error: {e}")
 
         try:
-            from black_vault import swarm
+            from black_vault import swarm  # type: ignore
             if hasattr(swarm, 'evolution'):
                 swarm.evolution.update_composition("anomaly_classifier", list(self.classifier.history.keys()))
         except Exception:
@@ -76,9 +80,14 @@ class AnomalyClassifier:
     def observe(self, category: str, value: float):
         if category not in self.history:
             self.history[category] = []
-        self.history[category].append((datetime.utcnow(), value))
+        self.history[category].append((time.time(), value))
         if len(self.history[category]) > 50:
             self.history[category] = self.history[category][-50:]
+
+        if len(self.history) > MAX_CATEGORIES:
+            oldest = list(self.history.keys())[0]
+            del self.history[oldest]
+
         self._evaluate(category)
 
     def _evaluate(self, category: str):
@@ -117,6 +126,11 @@ class AnomalyClassifier:
         except Exception as e:
             print(f"[⚠️] GhostLayer mutation failed: {e}")
 
+    def debug_memory(self):
+        import sys
+        total = sum(sys.getsizeof(v) for v in self.history.values())
+        print(f"[🧠] History size: {len(self.history)} categories, approx {total} bytes")
+
     def export_model(self, path="anomaly_model.json"):
         with open(path, 'w') as f:
             json.dump(self.history, f, cls=DateTimeEncoder)
@@ -150,7 +164,9 @@ class AnomalyClassifierDaemon:
                 self.classifier.observe("cpu_usage", 90.0)
 
             self.sync.broadcast_profile()
-            self.classifier.export_model()
+            if random.random() < 0.05:
+                self.classifier.export_model()
+            self.classifier.debug_memory()
             time.sleep(self.interval)
 
 # Example Usage

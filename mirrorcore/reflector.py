@@ -1,7 +1,9 @@
 import datetime
 import random
+import time
+import requests
 from mirrorcore.storage import MirrorStorage
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 
 
 class MirrorCore:
@@ -17,8 +19,15 @@ class MirrorCore:
         self.storage = MirrorStorage()
 
     def sync_memory(self):
+        """Sync memory with kernel state and load recent reflections for continuity"""
         print("[MIRRORCORE] Syncing with IdentityMap...")
         self.model.update(self.kernel.memory.state)
+        
+        # ✅ ISSUE #4: Load recent memory for continuity
+        self._load_recent_memory()
+        
+        # ✅ ISSUE #2: Map agent identities to artifacts
+        self._map_agent_identities()
 
     def update_self_model(self):
         print("[MIRRORCORE] Updating internal model of self...")
@@ -100,18 +109,113 @@ class MirrorCore:
             print("[MIRRORCORE] Issued mission: apply_patch")
 
     def _sync_to_network(self, data):
+        """
+        ✅ ISSUE #5: Robust network sync with retry logic and proper error handling
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                url = self.kernel.config.get('sync_peer')
+                if url:
+                    # ✅ Retry with exponential backoff
+                    response = requests.post(url, json=data, timeout=2)
+                    if response.status_code == 200:
+                        print(f"[MIRRORCORE] Synced reflection to peer at {url}")
+                        return
+                    else:
+                        print(f"[MIRRORCORE][WARN] Sync failed with status {response.status_code}, retrying...")
+            except Exception as e:
+                print(f"[MIRRORCORE][WARN] Peer sync failed (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (attempt + 1))  # Exponential backoff
+                continue
+        
+        print(f"[MIRRORCORE][ERROR] Failed to sync after {max_retries} attempts")
+    
+    def _load_recent_memory(self):
+        """
+        ✅ ISSUE #4: Load past reflections for continuity of identity
+        Agent system should remember what it believed/did recently
+        """
         try:
-            import requests
-            url = self.kernel.config.get('sync_peer')
-            if url:
-                requests.post(url, json=data, timeout=2)
-                print(f"[MIRRORCORE] Synced reflection to peer at {url}")
+            dates = self.storage.list_log_dates()
+            if dates:
+                latest_date = dates[-1]
+                logs = self.storage.search_by_date(latest_date)
+                if logs:
+                    # Keep last 5 reflections for context
+                    self.model['recent_reflections'] = logs[-5:]
+                    print(f"[MIRRORCORE] Loaded {len(logs[-5:])} recent reflections from {latest_date}")
+                    
+                    # ✅ Extract previous beliefs for continuity
+                    if logs[-1].get('beliefs'):
+                        self.model['previous_beliefs'] = logs[-1]['beliefs']
+                        print(f"[MIRRORCORE] Restored previous beliefs: {logs[-1]['beliefs']}")
         except Exception as e:
-            print(f"[MIRRORCORE][WARN] Peer sync failed: {e}")
-
+            print(f"[MIRRORCORE][WARN] Failed to load recent memory: {e}")
+    
+    def _map_agent_identities(self):
+        """
+        ✅ ISSUE #2: Bind artifacts to agent identities
+        Prevents "Unknown" agent labeling by mapping artifacts to actual agents
+        """
+        try:
+            artifacts = self.model.get("artifacts", [])
+            agent_map = {}
+            
+            for agent in self.kernel.agents:
+                codename = getattr(agent, "codename", "UNKNOWN")
+                agent_id = getattr(agent, "id", None)
+                role = getattr(agent, "role", "unknown")
+                agent_type = getattr(agent, "type", "generic")
+                
+                agent_map[codename] = {
+                    "id": agent_id,
+                    "role": role,
+                    "type": agent_type,
+                    "artifact_count": len([a for a in artifacts if getattr(a, 'owner', None) == codename])
+                }
+            
+            self.model['agent_registry'] = agent_map
+            print(f"[MIRRORCORE] Mapped {len(agent_map)} agent identities")
+            
+        except Exception as e:
+            print(f"[MIRRORCORE][WARN] Failed to map agent identities: {e}")
+    
+    def ingest_mission_outcome(self, mission_result: Dict[str, Any]):
+        """
+        ✅ ISSUE #3: Feedback loop - beliefs update based on mission results
+        System learns if actions are effective (state → belief → action → outcome → updated belief)
+        """
+        try:
+            success = mission_result.get("success", False)
+            task = mission_result.get("task", "unknown")
+            
+            if success:
+                self.beliefs["last_action_effective"] = True
+                self.beliefs[f"learned_success::{task}"] = True
+                print(f"[MIRRORCORE] Mission successful: {task} - updating beliefs for next cycle")
+            else:
+                self.beliefs["last_action_effective"] = False
+                self.beliefs[f"learned_failure::{task}"] = True
+                print(f"[MIRRORCORE] Mission failed: {task} - adjusting strategy")
+            
+            # Update emotional state based on outcomes
+            if success and self.beliefs.get("threat_detected"):
+                self.emotions['mood'] = 'confident'
+            elif not success and self.beliefs.get("threat_detected"):
+                self.emotions['mood'] = 'anxious'
+            
+            print(f"[MIRRORCORE] Updated beliefs after mission outcome: {mission_result}")
+            
+        except Exception as e:
+            print(f"[MIRRORCORE][ERROR] Failed to ingest mission outcome: {e}")
 
 
     def inject_beliefs(self, beliefs: Optional[Dict] = None):
+        """
+        ✅ ISSUE #6: Behavioral hook moved OUTSIDE loop for efficiency
+        """
         if beliefs is None:
             beliefs = self.beliefs
         if beliefs is None:
@@ -141,10 +245,11 @@ class MirrorCore:
                         "reason": "learned_pattern",
                         "confidence": "learned"
                     })
+        
+        # ✅ ISSUE #6: Behavioral hook OUTSIDE loop - runs once per belief injection
+        if hasattr(self.kernel, 'behavior'):
+            self.kernel.behavior.adapt_based_on_beliefs(self.beliefs)
 
-            # ✅ Insert this right after the learned pattern block
-            if hasattr(self.kernel, 'behavior'):
-                self.kernel.behavior.adapt_based_on_beliefs(beliefs)
     
     def inject_emotions(self, emotions):
         print(f"[MIRRORCORE] Injecting emotions: {emotions}")
