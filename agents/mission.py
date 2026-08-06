@@ -187,28 +187,13 @@ class MissionAgent(BaseAgent):
                 
                 return scan_data
             else:
-                # Fallback to simulation
-                log.warning("MissionExecutor unavailable, using fallback simulation")
-                return self._fallback_scan_simulation(target_ip)
+                return self._unavailable_result(mission, "MissionExecutor")
         
         except Exception as e:
             log.error(f"Deep scan failed: {e}")
             mission.data["status"] = "failed"
             mission.data["error"] = str(e)
             return {"status": "failed", "error": str(e)}
-    
-    def _fallback_scan_simulation(self, target_ip: str) -> Dict:
-        """Fallback simulation when MissionExecutor unavailable."""
-        return {
-            "target_ip": target_ip,
-            "status": "simulated",
-            "vulnerabilities": [
-                {"port": 22, "service": "openssh", "cve": "CVE-2018-15473", "severity": "medium"},
-                {"port": 80, "service": "apache", "cve": "CVE-2021-41773", "severity": "critical"},
-            ],
-            "critical_count": 1,
-            "exploit_count": 1,
-        }
     
     def _deduct_scan_cost(self, vuln_count: int, critical_count: int) -> None:
         """Deduct economic cost for deep scan."""
@@ -261,26 +246,13 @@ class MissionAgent(BaseAgent):
                 
                 return monitor_data
             else:
-                # Fallback to simulation
-                log.warning("FileMonitor unavailable, using fallback simulation")
-                return self._fallback_monitor_simulation()
+                return self._unavailable_result(mission, "FileMonitor")
         
         except Exception as e:
             log.error(f"Monitor mission failed: {e}")
             mission.data["status"] = "failed"
             mission.data["error"] = str(e)
             return {"status": "failed", "error": str(e)}
-    
-    def _fallback_monitor_simulation(self) -> Dict:
-        """Fallback simulation when FileMonitor unavailable."""
-        return {
-            "status": "simulated",
-            "changes_detected": True,
-            "modified_files": ["/etc/passwd", "/etc/shadow"],
-            "new_processes": [{"pid": 12345, "name": "apache2", "ppid": 1}],
-            "suspicious_processes": [],
-            "new_connections": [{"src": "192.168.1.10", "dst": "10.0.0.5", "port": 443}],
-        }
     
     def _deduct_monitor_cost(self, change_count: int) -> None:
         """Deduct economic cost for monitoring."""
@@ -347,9 +319,7 @@ class MissionAgent(BaseAgent):
                 
                 return patch_data
             else:
-                # Fallback to simulation
-                log.warning("PatchManager unavailable, using fallback simulation")
-                return self._fallback_patch_simulation(patch_id, service, new_version)
+                return self._unavailable_result(mission, "PatchManager")
         
         except Exception as e:
             log.error(f"Patch mission failed: {e}")
@@ -357,17 +327,12 @@ class MissionAgent(BaseAgent):
             mission.data["error"] = str(e)
             return {"status": "failed", "error": str(e)}
     
-    def _fallback_patch_simulation(self, patch_id: str, service: str, version: str) -> Dict:
-        """Fallback simulation when PatchManager unavailable."""
-        return {
-            "patch_id": patch_id,
-            "status": "simulated",
-            "service": service,
-            "new_version": version,
-            "files_modified": [f"/etc/{service}/config.conf"],
-            "services_restarted": [service],
-            "rollback_available": True,
-        }
+    def _unavailable_result(self, mission: Mission, component: str) -> Dict:
+        error = f"{component} is unavailable"
+        log.error("Mission %s failed: %s", mission.mission_id, error)
+        mission.data["status"] = "failed"
+        mission.data["error"] = error
+        return {"status": "failed", "error": error}
     
     def _deduct_patch_cost(self, cves_fixed: int, error_count: int) -> None:
         """Deduct economic cost for patching."""

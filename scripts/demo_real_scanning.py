@@ -79,7 +79,7 @@ def demo_real_scan():
         if not hosts:
             print("[!] No hosts found. Possible reasons:")
             print("    - No hosts on this subnet")
-            - ARP requires Administrator privileges")
+            print("    - ARP requires Administrator privileges")
             print("    - Network interface not properly configured")
             print()
             return
