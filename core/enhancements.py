@@ -72,16 +72,14 @@ class AsyncReconExecutor:
         return results
     
     async def _exploit_xss(self, target: str, vectors: List[str]):
-        """Async XSS exploitation."""
-        logger.info(f"[AsyncExploit] Exploiting {len(vectors)} XSS vectors on {target}")
-        await asyncio.sleep(0.1)  # Placeholder for actual exploitation
-        return {"type": "xss", "count": len(vectors), "status": "complete"}
+        """Report unsupported XSS execution without claiming success."""
+        logger.warning("[AsyncExploit] XSS execution is unavailable for %s", target)
+        return {"type": "xss", "count": len(vectors), "status": "unsupported"}
     
     async def _exploit_sqli(self, target: str, vectors: List[str]):
-        """Async SQLi exploitation."""
-        logger.info(f"[AsyncExploit] Exploiting {len(vectors)} SQLi vectors on {target}")
-        await asyncio.sleep(0.1)  # Placeholder for actual exploitation
-        return {"type": "sqli", "count": len(vectors), "status": "complete"}
+        """Report unsupported SQLi execution without claiming success."""
+        logger.warning("[AsyncExploit] SQLi execution is unavailable for %s", target)
+        return {"type": "sqli", "count": len(vectors), "status": "unsupported"}
 
 
 # ============================================================================

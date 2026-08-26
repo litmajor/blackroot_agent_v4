@@ -12,13 +12,10 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
-    # Stub implementations
     AES = None
-    get_random_bytes = lambda size: b'\x00' * size
-    def pad(data, blocksize):
-        return data
-    def unpad(data, blocksize):
-        return data
+    get_random_bytes = None
+    pad = None
+    unpad = None
 
 import queue
 
@@ -36,6 +33,8 @@ class SecureChannel:
             print(f"[SECURE] Failed to send message to {target}: {e}")
             return False
     def __init__(self, node_id: str):
+        if not CRYPTO_AVAILABLE:
+            raise RuntimeError("SecureChannel requires pycryptodome")
         self.node_id = node_id
         self.shared_key = self._derive_key("blackroot_mesh_secret")
         self.inbox = queue.Queue()
@@ -56,11 +55,7 @@ class SecureChannel:
         return pad(passphrase.encode(), 16)[:16]  # AES-128
 
     def encrypt(self, data: Dict) -> str:
-        """Encrypt message data (requires Crypto library)."""
-        if not CRYPTO_AVAILABLE:
-            # Fallback: base64 encode only (no real encryption)
-            return base64.b64encode(json.dumps(data).encode()).decode()
-        
+        """Encrypt message data."""
         raw = json.dumps(data).encode()
         iv = get_random_bytes(16)
         cipher = AES.new(self.shared_key, AES.MODE_CBC, iv)
@@ -68,14 +63,7 @@ class SecureChannel:
         return base64.b64encode(iv + ct).decode()
 
     def decrypt(self, encrypted: str) -> Dict:
-        """Decrypt message data (requires Crypto library)."""
-        if not CRYPTO_AVAILABLE:
-            # Fallback: base64 decode only (no real decryption)
-            try:
-                return json.loads(base64.b64decode(encrypted.encode()).decode())
-            except Exception:
-                return {}
-        
+        """Decrypt message data."""
         blob = base64.b64decode(encrypted.encode())
         iv = blob[:16]
         ct = blob[16:]
@@ -100,9 +88,12 @@ class SecureChannel:
                 print(f"[SECURE] Failed to decrypt message: {e}")
         return results
 
-    def simulate_incoming(self, message: Dict):
-        # For test/diagnostic use
+    def add_incoming_message(self, message: Dict):
+        """Queue a message for local testing and diagnostics."""
         self.inbox.put(self.encrypt(message))
+
+    def simulate_incoming(self, message: Dict):
+        self.add_incoming_message(message)
 
     def _start_listener(self):
         def listen():

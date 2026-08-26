@@ -213,20 +213,18 @@ class PythonScriptHandler(SoftwareHandler):
         return self.security_manager.execute_safely(compiled_code, context)
 
 class BinaryHandler(SoftwareHandler):
-    """Handler for binary executables."""
+    """Reject binary execution when no isolated runtime is configured."""
     
     def execute(self, code_obj: Dict[str, Any], context: Dict[str, Any]) -> Any:
-        # Simulate binary execution (actual implementation would be platform-specific)
-        logger.info(f"Simulating execution of binary: {code_obj.get('name', 'unknown')}")
-        return True
+        name = code_obj.get('name', 'unknown')
+        raise RuntimeError(f"Binary execution is unavailable for {name}")
 
 class RustScriptHandler(SoftwareHandler):
-    """Handler for Rust code execution."""
+    """Reject Rust execution when no isolated runtime is configured."""
     
     def execute(self, code_obj: Dict[str, Any], context: Dict[str, Any]) -> Any:
-        logger.info("Simulating Rust code execution")
-        # In real implementation, this would compile and execute Rust code
-        return True
+        name = code_obj.get('name', 'unknown')
+        raise RuntimeError(f"Rust execution is unavailable for {name}")
 
 # Create handler instances
 security_manager = SecurityManager()
