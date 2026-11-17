@@ -21,9 +21,22 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from collections import deque
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
+    hashes = None  # type: ignore
+    PBKDF2HMAC = None  # type: ignore
+    class Fernet:  # type: ignore
+        def __init__(self, key):
+            self.key = key
+        def encrypt(self, data: bytes) -> bytes:
+            return b"ENC:" + data
+        def decrypt(self, data: bytes) -> bytes:
+            return data[4:] if data.startswith(b"ENC:") else data
 import logging
 
 
@@ -369,6 +382,10 @@ class ExfiltratorAgent:
     """Main Exfiltrator Agent - Stealth Data Extraction Specialist"""
     
     def __init__(self, mission: ExfiltrationMission, config: Optional[Dict] = None):
+        self.mission = mission
+        self.agent_id = f"EXF-SHADOW-{mission.mission_id}"
+        self.config = config or {}
+
         # Accountant engine (must be provided in config or as singleton)
         self.accountant = None
         if config and 'accountant' in config:
@@ -384,6 +401,7 @@ class ExfiltratorAgent:
         if self.accountant:
             from decimal import Decimal
             self.accountant.register_agent(self.agent_id, Decimal('100'))  # Default initial budget
+
         # Orchestration hooks (placeholders, to be called by orchestrator)
         self.orchestration_hooks = {
             'pre_mission': [],  # List of callables to run before mission
@@ -391,23 +409,6 @@ class ExfiltratorAgent:
             'on_extraction': [], # Called after each extraction
             'on_transmit': [],   # Called after each transmission
         }
-
-    def register_hook(self, event: str, func: Callable):
-        """Register a callable orchestration hook for a given event."""
-        if event in self.orchestration_hooks:
-            self.orchestration_hooks[event].append(func)
-        else:
-            raise ValueError(f"Unknown orchestration event: {event}")
-
-    def _run_hooks(self, event: str, *args, **kwargs):
-        for func in self.orchestration_hooks.get(event, []):
-            try:
-                func(*args, **kwargs)
-            except Exception as e:
-                self.logger.error(f"Orchestration hook error on {event}: {e}")
-        self.mission = mission
-        self.agent_id = f"EXF-SHADOW-{mission.mission_id}"
-        self.config = config or {}
 
         # BlackVault integration
         vault_cfg = self.config.get('vault', {})
@@ -448,11 +449,51 @@ class ExfiltratorAgent:
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(f"ExfiltratorAgent-{self.agent_id}")
         self.logger.info(f"Exfiltrator Agent {self.agent_id} initialized for mission {mission.mission_id}")
+
+    def register_hook(self, event: str, func: Callable):
+        """Register a callable orchestration hook for a given event."""
+        if event in self.orchestration_hooks:
+            self.orchestration_hooks[event].append(func)
+        else:
+            raise ValueError(f"Unknown orchestration event: {event}")
+
+    def _run_hooks(self, event: str, *args, **kwargs):
+        for func in self.orchestration_hooks.get(event, []):
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                self.logger.error(f"Orchestration hook error on {event}: {e}")
     
     def execute_mission(self) -> Dict:
         self._run_hooks('pre_mission', self)
         """Execute the complete exfiltration mission"""
         self.logger.info(f"Starting mission execution: {self.mission.mission_id}")
+
+        # ── ECONOMIC GATE ──────────────────────────────────────────────────
+        # Exfil missions cost 0.8 ROOT. Check budget before any work starts.
+        # On failure return a structured abort result so the caller can react.
+        if self.accountant:
+            from decimal import Decimal
+            EXFIL_COST = Decimal('0.8')
+            approved, reason = self.accountant.process_agent_spend(
+                self.agent_id, EXFIL_COST,
+                f"Exfil mission cost (mission_id={self.mission.mission_id})"
+            )
+            if not approved:
+                self.logger.warning(
+                    f"[💸] Exfil mission ABORTED — insufficient ROOT: {reason} "
+                    f"(needed {EXFIL_COST} ROOT)"
+                )
+                return {
+                    'mission_id': self.mission.mission_id,
+                    'success': False,
+                    'abort_reason': f"Economic gate: {reason}",
+                    'extractions': 0,
+                    'transmissions': 0,
+                    'data_transmitted': 0,
+                }
+        # ── END ECONOMIC GATE ──────────────────────────────────────────────
+
         self.mission_status = "EXECUTING"
         try:
             # Phase 1: Target reconnaissance and data location

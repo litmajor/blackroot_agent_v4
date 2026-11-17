@@ -2,8 +2,18 @@
 import asyncio
 import json
 import os
-from dotenv import load_dotenv
-from web3 import Web3
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        pass
+
+try:
+    from web3 import Web3
+    HAS_WEB3 = True
+except ImportError:
+    Web3 = None
+    HAS_WEB3 = False
 from logging import config
 import uuid
 from dataclasses import field

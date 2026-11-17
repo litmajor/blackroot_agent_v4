@@ -4,8 +4,13 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from enum import Enum
-import redis.asyncio as redis
-from redis.exceptions import WatchError
+try:
+    import redis.asyncio as redis
+    from redis.exceptions import WatchError
+except ImportError:
+    redis = None
+    class WatchError(Exception):
+        pass
 
 # Enhanced configuration for full v3 features
 CFG = {

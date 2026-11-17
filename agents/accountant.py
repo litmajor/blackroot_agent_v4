@@ -20,8 +20,21 @@ import logging
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'economic'))
-from economic.wallet import WalletManager, ChainWallet, TransactionRequest
-from economic.bel_layer import EconomicEngine, Market, RiskManager
+try:
+    from economic.wallet import WalletManager, ChainWallet, TransactionRequest
+    WALLET_INTEGRATION_AVAILABLE = True
+except Exception:
+    WalletManager = None  # type: ignore
+    ChainWallet = None    # type: ignore
+    TransactionRequest = None  # type: ignore
+    WALLET_INTEGRATION_AVAILABLE = False
+
+try:
+    from economic.bel_layer import EconomicEngine, Market, RiskManager
+except Exception:
+    EconomicEngine = None  # type: ignore
+    Market = None  # type: ignore
+    RiskManager = None  # type: ignore
 
 class TransactionType(Enum):
     DEPOSIT = "deposit"
@@ -154,7 +167,7 @@ class ACCLedger:
         self.economic_health_metrics: Dict = {}
         # Threading for continuous monitoring
         self.monitoring_active = True
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         # Initialize system
         self._initialize_system()
         self._start_monitoring()
