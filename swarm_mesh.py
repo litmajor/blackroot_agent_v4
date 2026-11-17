@@ -45,6 +45,7 @@ from enum import Enum
 from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 from core.redis_client import get_redis_client
 from core.redis_config import RedisDB
+from secure_channel import SecureChannel
 
 class BlackrootHost:
     # --- Mesh compatibility fields (dynamic, for peer tracking) ---
@@ -256,75 +257,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Define a SecureChannelBase for type consistency
-class SecureChannelBase:
-    def __init__(self, node_id: str):
-        self.node_id = node_id
-
-    def pull_messages(self) -> List[Dict]:
-        raise NotImplementedError
-
-    def send_message(self, target: str, message: Dict) -> bool:
-        raise NotImplementedError
-
-    def add_incoming_message(self, message: Dict):
-        raise NotImplementedError
-
-try:
-    from secure_channel import SecureChannel as ExternalSecureChannel
-    SecureChannel: Any = ExternalSecureChannel  # type: ignore[assignment]
-except Exception:
-    logger.warning("SecureChannel module not found. Using enhanced mock implementation.")
-
-    class SecureChannel(SecureChannelBase):
-        """Enhanced mock implementation of SecureChannel with encryption simulation"""
-        def __init__(self, node_id: str):
-            super().__init__(node_id)
-            self.message_queue = []
-            self.encryption_key = hashlib.sha256(node_id.encode()).hexdigest()[:32]
-            self.message_counter = 0
-
-        def pull_messages(self) -> List[Dict]:
-            messages = self.message_queue[:]
-            self.message_queue = []
-            return messages
-
-        def send_message(self, target: str, message: Dict) -> bool:
-            try:
-                # Simulate message encryption/signing
-                encrypted_msg = self._encrypt_message(message)
-                logger.debug(f"Encrypted message to {target}: {len(str(encrypted_msg))} bytes")
-
-                # In real implementation, this would send over network
-                # For mock, we'll simulate delivery with some probability
-                delivery_success = random.random() > 0.05  # 95% delivery rate
-
-                if delivery_success:
-                    self.message_counter += 1
-                    return True
-                else:
-                    logger.warning(f"Simulated message delivery failure to {target}")
-                    return False
-
-            except Exception as e:
-                logger.error(f"Failed to send message to {target}: {e}")
-                return False
-
-        def _encrypt_message(self, message: Dict) -> str:
-            """Simulate message encryption"""
-            msg_str = json.dumps(message, sort_keys=True)
-            # Simple mock encryption using base64 + key
-            import base64
-            encrypted = base64.b64encode(
-                (self.encryption_key + msg_str).encode()
-            ).decode()
-            return encrypted
-
-        def add_incoming_message(self, message: Dict):
-            """Add an incoming message to the queue (for testing)"""
-            self.message_queue.append(message)
-
 
 class NodeStatus(Enum):
     """Enumeration of possible node states"""
