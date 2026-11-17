@@ -490,6 +490,85 @@ class BlackRootAgentInitializer:
                 "error": str(e)
             }
             return False
+
+    def _start_economic_engine(self) -> bool:
+        """
+        Initialize and run the Blackroot Economic Layer (BEL) and Accountant Agent.
+        
+        This enables:
+        1. ACCLedger financial custodian singleton with background audit monitoring
+        2. Agent spending validation and scarcity burns (80% treasury, 20% burn sink)
+        3. Optional async BEL background economic cycle task if Redis is available
+        """
+        logger.info("\n" + "="*70)
+        logger.info("PHASE BEL: BLACKROOT ECONOMIC LAYER & ACCOUNTANT INITIALIZATION")
+        logger.info("="*70)
+        
+        try:
+            from agents.accountant import ACCLedger
+            from decimal import Decimal
+            
+            # Initialize ACCLedger singleton
+            accountant = ACCLedger(creator_id="SYSTEM")
+            logger.info("✓ ACCLedger singleton initialized successfully")
+            logger.info(f"  - Initial Treasury: {accountant.treasury_balance} ROOT")
+            logger.info(f"  - Registered Wallets: {len(accountant.agent_wallets)}")
+            
+            # Start background async BEL economic cycle if redis is available
+            try:
+                import threading
+                import asyncio
+                from economic.bel_layer import Ledger, economic_cycle_task
+                import redis.asyncio as aioredis
+                
+                # Check redis config
+                config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+                redis_url = "redis://localhost:6379"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                        redis_host = cfg.get("redis", {}).get("host", "localhost")
+                        if isinstance(redis_host, dict):
+                            redis_host = "localhost"
+                        redis_port = cfg.get("redis", {}).get("port", 6379)
+                        redis_url = f"redis://{redis_host}:{redis_port}"
+                
+                def run_bel_loop():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    async def start_task():
+                        try:
+                            client = aioredis.from_url(redis_url, socket_connect_timeout=1.5)
+                            await client.ping()
+                            ledger = Ledger(client)
+                            await economic_cycle_task(ledger)
+                        except Exception as loop_err:
+                            logger.debug(f"BEL cycle async task idle (Redis offline): {loop_err}")
+                    try:
+                        loop.run_until_complete(start_task())
+                    except Exception:
+                        pass
+                
+                bel_thread = threading.Thread(target=run_bel_loop, daemon=True, name="BEL_EconomicCycle")
+                bel_thread.start()
+                logger.info("✓ BEL Economic Cycle background worker thread dispatched")
+            except Exception as bel_err:
+                logger.debug(f"BEL async loop skipped (non-critical): {bel_err}")
+            
+            self.results["components"]["economic_engine"] = {
+                "status": "success",
+                "treasury_balance": str(accountant.treasury_balance),
+                "monitoring_active": accountant.monitoring_active
+            }
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠ Economic engine initialization failed: {e}")
+            self.results["components"]["economic_engine"] = {
+                "status": "failed",
+                "error": str(e)
+            }
+            return False
     
     def full_initialization(self) -> Dict:
         """
@@ -516,6 +595,14 @@ class BlackRootAgentInitializer:
         
         # Initialize phone-home callback system for operator visibility
         phase_ph_ok = self.initialize_phone_home_callbacks()
+
+        # ── ECONOMIC ENGINE ───────────────────────────────────────────────
+        # Start the BEL EconomicEngine event loop in a daemon thread.
+        # This activates: ROI cycles, market order matching, circuit
+        # breakers, staking rewards, and systemic-risk monitoring.
+        # Without this the token math exists but nothing ever runs.
+        phase_bel_ok = self._start_economic_engine()
+        # ── END ECONOMIC ENGINE ───────────────────────────────────────────
         
         # Summary
         logger.info("\n" + "#"*70)
@@ -530,6 +617,7 @@ class BlackRootAgentInitializer:
             ("WMI Persistence (P2)", phase3_ok),
             ("Service Analysis (P2)", phase4_ok),
             ("Phone-Home Callbacks (PH)", phase_ph_ok),
+            ("Economic Engine (BEL)", phase_bel_ok),
         ]
         
         for phase_name, phase_ok in phases:

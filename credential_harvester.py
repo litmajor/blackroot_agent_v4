@@ -296,7 +296,7 @@ class PropagationCredentialHarvester:
         return creds
     
     def harvest_cached_domain_credentials(self) -> List[ExtractedCredential]:
-        """Extract domain cached credentials (for DomainJoin scenarios)
+        r"""Extract domain cached credentials (for DomainJoin scenarios)
         
         When domain unavailable, Windows caches domain credentials
         Stored in: HKLM\SECURITY\Cache

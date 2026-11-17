@@ -299,7 +299,9 @@ class BlackrootKernel:
             self.logger.warning(f"RepairAgent integration failed: {e}")
         self.stealth = CloakSupervisor(self, stealth_threshold=config.get('stealth_threshold', 0.8))
         self.behaviour = BehaviorAdapter(self)
+        self.behavior = self.behaviour  # Alias for reflector & learning hooks
         self.mirrorcore = MirrorCore(self)
+        self.storage = getattr(self.mirrorcore, "storage", None)
         self.anomaly_classifier = AnomalyClassifierDaemon()
         self.payload_engine = PayloadEngine()
         self.mutator_engine = MutatorEngine(source_path="mutator_engine.py")
@@ -345,6 +347,7 @@ class BlackrootKernel:
         register_module("payload_engine", lambda: self.payload_engine)
         register_module("mutator_engine", lambda: self.mutator_engine)
         register_module("mirrorcore", lambda: self.mirrorcore)
+        register_module("storage", lambda: self.storage)
         register_module("ghost_hive", lambda: self.ghost_hive)
         register_module("self_learning_injection", lambda: self.self_learning_injection)
         try:
