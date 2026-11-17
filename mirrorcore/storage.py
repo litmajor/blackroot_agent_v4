@@ -2,7 +2,28 @@ import json
 import os
 import time
 from datetime import datetime
-from cryptography.fernet import Fernet
+
+try:
+    from cryptography.fernet import Fernet
+    HAS_FERNET = True
+except ImportError:
+    HAS_FERNET = False
+    import base64
+    class Fernet:  # type: ignore
+        """Lightweight obfuscation cipher fallback when cryptography package is unavailable."""
+        def __init__(self, key):
+            self.key = key if isinstance(key, bytes) else str(key).encode()
+        @staticmethod
+        def generate_key():
+            return base64.urlsafe_b64encode(os.urandom(32))
+        def encrypt(self, data: bytes) -> bytes:
+            k = self.key
+            xored = bytes(b ^ k[i % len(k)] for i, b in enumerate(data))
+            return base64.b64encode(xored)
+        def decrypt(self, token: bytes) -> bytes:
+            k = self.key
+            decoded = base64.b64decode(token)
+            return bytes(b ^ k[i % len(k)] for i, b in enumerate(decoded))
 
 class MirrorStorage:
     def __init__(self, base_dir="mirrorcore/logs", key_path="mirrorcore/.key"):
@@ -62,3 +83,44 @@ class MirrorStorage:
 
     def list_log_dates(self):
         return sorted([f.split('_')[-1].replace('.jsonl', '') for f in os.listdir(self.base_dir) if f.startswith("reflections_") and f.endswith(".jsonl")])
+
+    def query_last(self, n: int = 100):
+        """
+        Query the last n reflection / log entries in reverse chronological order.
+        Handles decryption with graceful fallback to plaintext JSON lines.
+        """
+        results = []
+        if not os.path.exists(self.base_dir):
+            return results
+
+        files = sorted(
+            [f for f in os.listdir(self.base_dir) if f.startswith("reflections_") and f.endswith(".jsonl")],
+            reverse=True
+        )
+
+        for fname in files:
+            path = os.path.join(self.base_dir, fname)
+            try:
+                with open(path, "rb") as f:
+                    lines = f.readlines()
+                for line in reversed(lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        decrypted = self.cipher.decrypt(line).decode("utf-8")
+                        entry = json.loads(decrypted)
+                        results.append(entry)
+                    except Exception:
+                        try:
+                            entry = json.loads(line.decode("utf-8"))
+                            results.append(entry)
+                        except Exception:
+                            continue
+                    if len(results) >= n:
+                        return results
+            except Exception as e:
+                print(f"[MIRROR-STORAGE][WARN] Failed reading log file {fname}: {e}")
+                continue
+
+        return results

@@ -66,11 +66,20 @@ class LearningAgent(BaseAgent):
 
     # ------------------------------------------------------------------
     def _fetch_logs(self) -> List[Dict]:
-        storage = getattr(getattr(self, "kernel", None), "storage", None)
+        kernel = getattr(self, "kernel", None)
+        storage = getattr(kernel, "storage", None)
+        if storage is None and kernel is not None:
+            storage = getattr(getattr(kernel, "mirrorcore", None), "storage", None)
         if storage is None:
+            try:
+                from mirrorcore.storage import MirrorStorage
+                storage = MirrorStorage()
+            except Exception:
+                storage = None
+        if storage is None or not hasattr(storage, "query_last"):
             return []
         try:
-            return storage.query_last(n=100)  # adjust as needed
+            return storage.query_last(n=100)
         except Exception as e:
             log.warning("Storage query error: %s", e)
             return []
@@ -80,56 +89,89 @@ class LearningAgent(BaseAgent):
         cutoff = datetime.utcnow() - timedelta(minutes=self.window_minutes)
         self.stats.clear()
         for entry in logs:
+            if not entry or not isinstance(entry, dict):
+                continue
             ts = entry.get("timestamp")
-            # Defensive: handle both ISO and float timestamps
             dt = None
             if ts:
                 try:
                     if isinstance(ts, str):
-                        dt = datetime.fromisoformat(ts)
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                     else:
                         dt = datetime.utcfromtimestamp(float(ts))
                 except Exception:
                     dt = None
             if dt and dt < cutoff:
                 continue
-            atype = entry.get("anomaly_class", {}).get("type")
+            # Extract anomaly type from multiple known schemas
+            atype = (
+                entry.get("anomaly_class", {}).get("type")
+                or entry.get("anomaly_type")
+                or entry.get("event_type")
+            )
             if atype:
                 self.stats[atype] = self.stats.get(atype, 0) + 1
 
     # ------------------------------------------------------------------
     def _adapt(self) -> None:
-        for atype, count in self.stats.items():
+        if not hasattr(self, "learned_patterns"):
+            self.learned_patterns = {}
+
+        for atype, count in list(self.stats.items()):
             if count < self.threshold:
                 continue
 
-            log.debug("Learned pattern '%s' (%s hits)", atype, count)
+            log.info("Learned pattern '%s' (%s hits >= threshold %s)", atype, count, self.threshold)
+            self.learned_patterns[atype] = count
             self._inject_learnings(atype, count)
 
         self._maybe_log()
 
     # ------------------------------------------------------------------
     def _inject_learnings(self, atype: str, count: int):
+        beliefs_payload = {
+            f"learned_pattern::{atype}": f"{count}_hits",
+            f"learned::{atype}": count
+        }
+
         # 1. MirrorCore beliefs / emotions / missions
-        mc = getattr(self.kernel, "mirrorcore", None)
+        mc = getattr(getattr(self, "kernel", None), "mirrorcore", None)
         if mc is not None:
-            mc.inject_beliefs({f"learned::{atype}": count})
-            mc.inject_emotions(["vigilant"])
-            mc.dispatch_mission({"task": f"preempt_{atype}", "reason": "learned", "confidence": "high"})
+            try:
+                mc.inject_beliefs(beliefs_payload)
+                if hasattr(mc, "inject_emotions") and callable(mc.inject_emotions):
+                    mc.inject_emotions(["vigilant"])
+                if hasattr(mc, "dispatch_mission") and callable(mc.dispatch_mission):
+                    mc.dispatch_mission({"task": f"preempt_{atype}", "reason": "learned", "confidence": "high"})
+            except Exception as e:
+                log.warning(f"MirrorCore belief injection failed: {e}")
 
-        # 2. SwarmMesh telemetry
-        redis = getattr(getattr(self.kernel, "swarm", None), "redis", None)
-        if redis:
-            redis.publish(
-                "learned_anomalies",
-                json.dumps({"atype": atype, "count": count, "ts": datetime.utcnow().isoformat()}, separators=(",", ":")),
-            )
+        # 2. BehaviorAdapter synchronization (escalate defender priority)
+        behavior = getattr(getattr(self, "kernel", None), "behavior", None) or getattr(getattr(self, "kernel", None), "behaviour", None)
+        if behavior is not None and hasattr(behavior, "adapt_based_on_beliefs"):
+            try:
+                behavior.adapt_based_on_beliefs(beliefs_payload)
+            except Exception as e:
+                log.warning(f"BehaviorAdapter adaptation failed: {e}")
 
-        # 3. Flag defender agents (placeholder)
-        agents = getattr(self.kernel, "agents", [])
+        # 3. Direct agent priority escalation for defense/repair units
+        agents = getattr(getattr(self, "kernel", None), "agents", [])
         for agent in agents:
-            if "defender" in str(getattr(agent, "codename", "")).lower():
-                log.debug("Flagged %s for escalation", agent.codename)
+            cname = str(getattr(agent, "codename", "")).upper()
+            if any(k in cname for k in ["DEFENDER", "REPAIR", "CLOAK", "ENFORCER"]):
+                agent.priority = "high"
+                log.debug("Escalated %s → high priority due to %s", getattr(agent, "codename", ""), atype)
+
+        # 4. SwarmMesh telemetry broadcast (fault-tolerant)
+        try:
+            redis = getattr(getattr(getattr(self, "kernel", None), "swarm", None), "redis", None)
+            if redis and hasattr(redis, "publish"):
+                redis.publish(
+                    "learned_anomalies",
+                    json.dumps({"atype": atype, "count": count, "ts": datetime.utcnow().isoformat()}, separators=(",", ":")),
+                )
+        except Exception as e:
+            log.debug(f"Swarm telemetry publish skipped: {e}")
 
     # ------------------------------------------------------------------
     def _maybe_log(self):

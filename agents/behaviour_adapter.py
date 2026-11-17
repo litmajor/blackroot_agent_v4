@@ -17,10 +17,11 @@ class BehaviorAdapter:
     # ------------------------------------------------------------------
     def adapt_based_on_beliefs(self, beliefs: Dict[str, Any]) -> None:
         for key, value in beliefs.items():
-            if not key.startswith("learned_pattern::"):
+            if not (key.startswith("learned_pattern::") or key.startswith("learned::")):
                 continue
             atype = key.split("::")[1]
-            frequency = int(value) if str(value).isdigit() else 0
+            clean_val = str(value).replace("_hits", "").strip()
+            frequency = int(clean_val) if clean_val.isdigit() else 0
             if frequency < self.threshold:
                 continue
 

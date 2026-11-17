@@ -1,9 +1,15 @@
 import datetime
 import random
 import time
-import requests
-from mirrorcore.storage import MirrorStorage
 from typing import Dict, Optional, List, Any
+from mirrorcore.storage import MirrorStorage
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    requests = None  # type: ignore
+    HAS_REQUESTS = False
 
 
 class MirrorCore:
@@ -112,6 +118,9 @@ class MirrorCore:
         """
         ✅ ISSUE #5: Robust network sync with retry logic and proper error handling
         """
+        if not HAS_REQUESTS:
+            return
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -224,9 +233,10 @@ class MirrorCore:
         self.beliefs.update(beliefs)
 
         for key, value in beliefs.items():
-            if key.startswith("learned_pattern::"):
+            if key.startswith("learned_pattern::") or key.startswith("learned::"):
                 atype = key.split("::")[1]
-                count = int(value.replace("_hits", ""))
+                clean_val = str(value).replace("_hits", "").strip()
+                count = int(clean_val) if clean_val.isdigit() else 0
 
                 print(f"[MIRRORCORE] Storing learned pattern: {atype} ({count} hits)")
                 if not hasattr(self, 'memory'):
@@ -247,8 +257,9 @@ class MirrorCore:
                     })
         
         # ✅ ISSUE #6: Behavioral hook OUTSIDE loop - runs once per belief injection
-        if hasattr(self.kernel, 'behavior'):
-            self.kernel.behavior.adapt_based_on_beliefs(self.beliefs)
+        behavior_module = getattr(self.kernel, 'behavior', None) or getattr(self.kernel, 'behaviour', None)
+        if behavior_module and hasattr(behavior_module, 'adapt_based_on_beliefs'):
+            behavior_module.adapt_based_on_beliefs(self.beliefs)
 
     
     def inject_emotions(self, emotions):
