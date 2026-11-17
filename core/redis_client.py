@@ -266,7 +266,24 @@ def get_redis_client(db: Union[int, Any, None] = None) -> RedisClient:
 
 def _create_dummy_client(config) -> RedisClient:
     """Create a dummy Redis client that handles None gracefully."""
+    class DummyPubSub:
+        def subscribe(self, *args, **kwargs):
+            pass
+        def unsubscribe(self, *args, **kwargs):
+            pass
+        def listen(self):
+            return iter([])
+        def get_message(self, *args, **kwargs):
+            return None
+        def close(self):
+            pass
+
     class DummyRedis:
+        is_dummy = True
+
+        def pubsub(self):
+            return DummyPubSub()
+
         def ping(self):
             return False
         def get(self, key):

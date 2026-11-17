@@ -1,7 +1,10 @@
 try:
     import zmq
-except ImportError:
+    ZMQAgain = zmq.Again
+except (ImportError, AttributeError):
     zmq = None
+    class ZMQAgain(Exception):
+        pass
 
 import threading
 import time
@@ -423,9 +426,15 @@ class PeerLinkerAgent(BaseAgent):
     # ------------------------------------------------------------------
     def _listen_loop(self):
         """Main listening loop for incoming connections"""
+        if not self.networking_available or not self.context or zmq is None:
+            logger.info("Networking not available (missing zmq/nacl); skipping listen loop")
+            return
         sock = None
         try:
             sock = self._get_or_create_socket(zmq.REP)
+            if not sock:
+                logger.warning("Could not create listening socket")
+                return
             sock.bind(f"tcp://*:{self.LISTEN_PORT}")
             logger.info(f"Listening on port {self.LISTEN_PORT}")
             
@@ -460,7 +469,7 @@ class PeerLinkerAgent(BaseAgent):
                             logger.warning(f"Message handling error: {e}")
                             sock.send(b"ERROR")
                             
-                except zmq.Again:
+                except ZMQAgain:
                     time.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Listen loop error: {e}")
@@ -731,7 +740,11 @@ class PeerLinkerAgent(BaseAgent):
             
         sock = None
         try:
+            if not self.networking_available or zmq is None:
+                raise RuntimeError("Networking not available (missing zmq/nacl)")
             sock = self._get_or_create_socket(zmq.PUSH)
+            if not sock:
+                raise RuntimeError("Socket creation failed")
             sock.connect(f"tcp://{addr[0]}:{addr[1]}")
             sock.send(raw)
         finally:
@@ -853,9 +866,13 @@ class PeerLinkerAgent(BaseAgent):
 
     def _ping_node(self, node_id, addr):
         """Ping a node to check if it's alive"""
+        if not self.networking_available or zmq is None:
+            return
         sock = None
         try:
             sock = self._get_or_create_socket(zmq.REQ)
+            if not sock:
+                return
             sock.connect(f"tcp://{addr[0]}:{addr[1]}")
             
             ping_msg = node_id + json.dumps({"type": "ping"}).encode()
