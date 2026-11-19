@@ -12,10 +12,11 @@ This bridges the gap between live_scanner → persistence → network_mapper
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 from recon.network_mapper import RealNetworkMapper, NodeProfile
 from recon.scan_persistence import ScanPersistence, DriftAnomalyDetector
 from recon.baseline_builder import RealBaselineBuilder, compare_to_baseline
+from recon.threat_intelligence import get_threat_loader, ThreatIntelligenceLoader
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class EnhancedNetworkMapper(RealNetworkMapper):
         self.persistence = ScanPersistence()
         self.baseline_builder = RealBaselineBuilder(self.persistence)
         self.real_baselines = {}  # {ip: RealNodeBaseline}
+        self.threat_loader = get_threat_loader()
     
     def load_real_baselines(self, subnet: str, max_scans: int = 10):
         """
@@ -155,9 +157,50 @@ class EnhancedNetworkMapper(RealNetworkMapper):
                 if ip in drift.get('new_hosts', []):
                     logger.info(f"[⚠️] {ip}: NEW HOST (not in baseline)")
                     node.status = "UNKNOWN"
+
+            # Step 5: Correlate Threat Intelligence and CVEs
+            self.enrich_node_with_threat_intel(node)
         
         return results
-    
+
+    def enrich_node_with_threat_intel(self, node: NodeProfile) -> NodeProfile:
+        """
+        Enriches a NodeProfile with vulnerability intelligence and exploit viability scores
+        from the ThreatIntelligenceLoader.
+        """
+        services_data = []
+        for s in getattr(node, 'services', []):
+            services_data.append({
+                "port": s.port,
+                "name": s.name,
+                "version": getattr(s, 'version', None),
+                "banner": getattr(s, 'product', '') or s.name
+            })
+
+        threat_assessment = self.threat_loader.assess_node_threat(
+            node_ip=node.ip,
+            open_ports=node.open_ports,
+            services=services_data
+        )
+
+        node.cves = threat_assessment["cves"]
+        node.threat_score = threat_assessment["threat_score"]
+        node.exploit_viability = threat_assessment["exploit_viability"]
+        node.threat_tags = threat_assessment["threat_tags"]
+
+        if node.cves:
+            logger.info(
+                f"[🎯] Threat Intel: {node.ip} matched {len(node.cves)} CVEs "
+                f"(exploit viability: {node.exploit_viability:.0%}, top: {node.cves[0]['cve_id']})"
+            )
+        return node
+
+    def get_cves_for_host(self, ip: str) -> List[Dict[str, Any]]:
+        """Get correlated CVE records for a specific host."""
+        if ip in self.discovered_nodes:
+            return getattr(self.discovered_nodes[ip], 'cves', [])
+        return []
+
     def get_baseline_for_host(self, ip: str):
         """Get real baseline for a specific host."""
         return self.real_baselines.get(ip)

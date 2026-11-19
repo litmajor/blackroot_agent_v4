@@ -16,6 +16,7 @@ from .network_mapper_integration import EnhancedNetworkMapper, integrate_persist
 from .scan_persistence import ScanPersistence, DriftAnomalyDetector
 from .resilience import CircuitBreaker, CircuitBreakerRegistry, RetryWithBackoff, make_canary, ChecksumCache
 from .passive_plus import PassivePlus
+from .cve_lookup import lookup_cves_for_banner, lookup_cves_for_service, get_service_viability
 
 __all__ = [
     # Core mapper
@@ -43,4 +44,8 @@ __all__ = [
     'ChecksumCache',
     # Passive recon helpers
     'PassivePlus',
+    # CVE lookup helpers
+    'lookup_cves_for_banner',
+    'lookup_cves_for_service',
+    'get_service_viability',
 ]

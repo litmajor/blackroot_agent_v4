@@ -214,12 +214,20 @@ class NodeProfile:
     last_seen: Optional[str] = None
     baseline: Optional[NodeBaseline] = None
     anomalies: List[AnomalyEvent] = field(default_factory=list)
+    cves: List[Dict[str, Any]] = field(default_factory=list)
+    threat_score: float = 0.0
+    exploit_viability: float = 0.0
+    threat_tags: List[str] = field(default_factory=list)
     
     def __post_init__(self):
         if self.services is None:
             self.services = []
         if self.open_ports is None:
             self.open_ports = []
+        if self.cves is None:
+            self.cves = []
+        if self.threat_tags is None:
+            self.threat_tags = []
         if self.last_seen is None:
             self.last_seen = datetime.now().isoformat()
     
@@ -271,6 +279,9 @@ class NodeProfile:
             baseline_factor = self.baseline.stability_score * 0.10
         
         score = isolation + reputation + stability + baseline_factor
+        # Exploit viability bonus: nodes with weaponizable/exploitable CVEs get priority targeting
+        if self.exploit_viability > 0:
+            score += self.exploit_viability * 0.20
         return min(1.0, score)
     
     def to_dict(self) -> Dict:
@@ -289,7 +300,11 @@ class NodeProfile:
             'last_seen': self.last_seen,
             'isolation_score': round(self.isolation_score, 3),
             'service_reputation': round(self.service_reputation, 3),
-            'zombie_candidate_score': round(self.zombie_candidate_score, 3)
+            'zombie_candidate_score': round(self.zombie_candidate_score, 3),
+            'threat_score': round(self.threat_score, 3),
+            'exploit_viability': round(self.exploit_viability, 3),
+            'cves': self.cves,
+            'threat_tags': self.threat_tags
         }
         return data
 

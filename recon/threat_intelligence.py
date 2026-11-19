@@ -335,33 +335,99 @@ class ThreatIntelligenceLoader:
                 description="HTTP/2 Rapid Reset attack vulnerability",
                 cvss_score=7.5,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
-                affected_products=["nginx", "Apache", "OpenBSD"],
+                affected_products=["nginx", "Apache", "OpenBSD", "http"],
                 severity=0.75,
                 exploit_available=True,
                 exploit_maturity="FUNCTIONAL_HIGH",
-                tags=["http2", "dos", "network"]
+                tags=["http2", "dos", "network", "web"]
             ),
             CVERecord(
                 cve_id="CVE-2023-21839",
                 description="Oracle WebLogic Server RCE vulnerability",
                 cvss_score=9.8,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-                affected_products=["Oracle WebLogic Server"],
+                affected_products=["Oracle WebLogic Server", "weblogic", "http"],
                 severity=0.98,
                 exploit_available=True,
                 exploit_maturity="FUNCTIONAL_HIGH",
-                tags=["rce", "oracle", "critical"]
+                tags=["rce", "oracle", "critical", "weblogic"]
             ),
             CVERecord(
                 cve_id="CVE-2023-22518",
                 description="Confluence Data Center Improper Authorization",
                 cvss_score=9.8,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-                affected_products=["Atlassian Confluence"],
+                affected_products=["Atlassian Confluence", "confluence", "http"],
                 severity=0.98,
                 exploit_available=True,
                 exploit_maturity="FUNCTIONAL_HIGH",
                 tags=["confluence", "auth_bypass", "critical"]
+            ),
+            CVERecord(
+                cve_id="CVE-2021-44228",
+                description="Apache Log4j2 JNDI RCE (Log4Shell)",
+                cvss_score=10.0,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                affected_products=["Apache Log4j", "log4j", "java", "http", "tomcat", "springboot"],
+                severity=1.0,
+                exploit_available=True,
+                exploit_maturity="FUNCTIONAL_HIGH",
+                tags=["rce", "log4shell", "critical", "java"]
+            ),
+            CVERecord(
+                cve_id="CVE-2020-1472",
+                description="Windows Netlogon Elevation of Privilege (Zerologon)",
+                cvss_score=10.0,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                affected_products=["Windows Server", "netlogon", "smb", "microsoft-ds"],
+                severity=1.0,
+                exploit_available=True,
+                exploit_maturity="FUNCTIONAL_HIGH",
+                tags=["zerologon", "privesc", "domain_controller", "smb", "critical"]
+            ),
+            CVERecord(
+                cve_id="CVE-2017-0144",
+                description="Windows SMBv1 Remote Code Execution (EternalBlue)",
+                cvss_score=9.8,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                affected_products=["Windows", "smb", "smbv1", "microsoft-ds"],
+                severity=0.98,
+                exploit_available=True,
+                exploit_maturity="FUNCTIONAL_HIGH",
+                tags=["smb", "eternalblue", "rce", "critical", "wormable"]
+            ),
+            CVERecord(
+                cve_id="CVE-2019-0708",
+                description="Windows Remote Desktop Services RCE (BlueKeep)",
+                cvss_score=9.8,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                affected_products=["Windows", "rdp", "ms-wbt-server", "terminal-services"],
+                severity=0.98,
+                exploit_available=True,
+                exploit_maturity="FUNCTIONAL_HIGH",
+                tags=["rdp", "bluekeep", "rce", "wormable", "critical"]
+            ),
+            CVERecord(
+                cve_id="CVE-2024-6387",
+                description="OpenSSH Remote Unauthenticated Code Execution (regreSSHion)",
+                cvss_score=8.1,
+                cvss_vector="CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                affected_products=["OpenSSH", "ssh", "sshd"],
+                severity=0.81,
+                exploit_available=True,
+                exploit_maturity="PROOF_OF_CONCEPT",
+                tags=["ssh", "openssh", "rce", "regresshion"]
+            ),
+            CVERecord(
+                cve_id="CVE-2021-34527",
+                description="Windows Print Spooler Remote Code Execution (PrintNightmare)",
+                cvss_score=8.8,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+                affected_products=["Windows", "spooler", "msrpc", "rpc"],
+                severity=0.88,
+                exploit_available=True,
+                exploit_maturity="FUNCTIONAL_HIGH",
+                tags=["printnightmare", "rce", "privesc", "windows"]
             ),
         ]
         
@@ -460,6 +526,110 @@ class ThreatIntelligenceLoader:
         
         # Sort by CVSS score (highest first)
         return sorted(relevant_cves, key=lambda x: x.cvss_score, reverse=True)
+
+    def match_service_to_cves(
+        self,
+        service_name: str,
+        version: Optional[str] = None,
+        banner: Optional[str] = None,
+        port: Optional[int] = None
+    ) -> List[CVERecord]:
+        """
+        Fuzzy matching connecting discovered service banners/ports to known CVE records.
+        """
+        matches: Dict[str, CVERecord] = {}
+        tokens = [service_name.lower()]
+        if banner:
+            tokens.extend([t.strip().lower() for t in banner.replace("/", " ").replace("-", " ").split() if len(t) > 2])
+
+        # Standard port associations
+        port_hints = {
+            21: ["ftp"],
+            22: ["ssh", "openssh"],
+            23: ["telnet"],
+            25: ["smtp"],
+            80: ["http", "apache", "nginx"],
+            135: ["rpc", "msrpc", "spooler"],
+            139: ["smb", "netbios"],
+            443: ["https", "http", "apache", "nginx", "ssl"],
+            445: ["smb", "microsoft-ds", "netlogon"],
+            3389: ["rdp", "ms-wbt-server"],
+            7001: ["weblogic", "http"],
+            8000: ["http"],
+            8080: ["http", "tomcat", "confluence", "weblogic"],
+            8090: ["confluence", "http"],
+            8443: ["https", "tomcat"],
+        }
+        if port and port in port_hints:
+            tokens.extend(port_hints[port])
+
+        for cve in self.cve_database.values():
+            # Check affected products
+            for prod in cve.affected_products:
+                p_lower = prod.lower()
+                if any(p_lower in token or token in p_lower for token in tokens):
+                    matches[cve.cve_id] = cve
+                    break
+            # Check tags
+            for tag in cve.tags:
+                if any(tag in token for token in tokens):
+                    matches[cve.cve_id] = cve
+                    break
+
+        return sorted(list(matches.values()), key=lambda x: x.cvss_score, reverse=True)
+
+    def assess_node_threat(
+        self,
+        node_ip: str,
+        open_ports: List[int],
+        services: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculates holistic threat score, exploit viability, and associated CVEs for a node.
+        """
+        services = services or []
+        matched_cves: Dict[str, CVERecord] = {}
+        all_tags: Set[str] = set()
+
+        for s in services:
+            s_name = s.get("name", "")
+            s_ver = s.get("version")
+            s_banner = s.get("banner", "")
+            s_port = s.get("port")
+            for cve in self.match_service_to_cves(s_name, version=s_ver, banner=s_banner, port=s_port):
+                matched_cves[cve.cve_id] = cve
+                all_tags.update(cve.tags)
+
+        # Port-level fallback matches if no services explicitly specified
+        if not services and open_ports:
+            for p in open_ports:
+                for cve in self.match_service_to_cves("", port=p):
+                    matched_cves[cve.cve_id] = cve
+                    all_tags.update(cve.tags)
+
+        # Calculate exploit viability: driven by available functional exploits + CVSS
+        exploit_viability = 0.0
+        if matched_cves:
+            highest_cvss = max(c.cvss_score for c in matched_cves.values())
+            has_functional = any(c.exploit_available and "FUNCTIONAL" in c.exploit_maturity for c in matched_cves.values())
+            base_viability = highest_cvss / 10.0
+            exploit_viability = min(1.0, base_viability * (1.2 if has_functional else 0.8))
+
+        # Check malicious IP
+        is_malicious = node_ip in self.malicious_ips
+        ip_threat_score = self.malicious_ips[node_ip].threat_score if is_malicious else 0.0
+
+        # General threat score
+        threat_score = max(ip_threat_score, exploit_viability * 0.9)
+
+        return {
+            "threat_score": round(threat_score, 2),
+            "exploit_viability": round(exploit_viability, 2),
+            "cves": [c.to_dict() for c in matched_cves.values()],
+            "threat_tags": sorted(list(all_tags)),
+            "is_malicious": is_malicious,
+            "cve_count": len(matched_cves)
+        }
     
     def export_as_dict(self) -> Dict[str, Any]:
         """Export all threat intelligence as dictionary"""

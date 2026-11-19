@@ -20,3 +20,5 @@ c2-routing.db
 .pk2
 logs/
 pki/
+data/*.db
+*.db
