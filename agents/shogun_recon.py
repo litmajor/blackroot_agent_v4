@@ -110,8 +110,8 @@ class ShogunReconAgent(BaseAgent):
         log.info("[🩸] Shogun reconnaissance started")
         
         if not SHOGUN_AVAILABLE or self.mapper is None:
-            log.warning("Shogun dependencies unavailable; agent will simulate operation")
-            self._run_stub_mode()
+            log.warning("Shogun passive mapper unavailable; using RealNetworkMapper active mode")
+            self._run_real_network_mapper()
             return
         
         config = getattr(self.kernel, "config", {}) if self.kernel else {}
@@ -200,16 +200,21 @@ class ShogunReconAgent(BaseAgent):
                 log.error(f"[!] ShogunReconAgent error: {e}", exc_info=True)
                 time.sleep(300)
     
-    def _run_stub_mode(self):
-        """Real network scanning mode - Phase 2 replacement for stub mode."""
+    def _run_real_network_mapper(self):
+        """Real network scanning mode using RealNetworkMapper (Phase 2)."""
         log.info("[🔍] Real network mapper activated (Phase 2 implementation)")
         
         try:
-            from recon.network_mapper import RealNetworkMapper
+            from recon.network_mapper_integration import EnhancedNetworkMapper
+            _MapperClass = EnhancedNetworkMapper
         except ImportError:
-            log.error("[❌] network_mapper not available; falling back to simulation")
-            self._run_fallback_simulation()
-            return
+            try:
+                from recon.network_mapper import RealNetworkMapper
+                _MapperClass = RealNetworkMapper
+            except ImportError:
+                log.error("[❌] network_mapper not available; falling back to simulation")
+                self._run_fallback_simulation()
+                return
         
         config = getattr(self.kernel, "config", {}) if self.kernel else {}
         shogun_cfg = config.get("shogun", {})
@@ -228,10 +233,12 @@ class ShogunReconAgent(BaseAgent):
                 cycle_count += 1
                 self._deduct_recon_cost()
                 
-                # Initialize mapper on first run
+                # Initialize mapper on first run — prefer EnhancedNetworkMapper
+                # for real persistence baselines; fall back to RealNetworkMapper
                 if mapper is None:
-                    mapper = RealNetworkMapper(vault=self.vault, config=shogun_cfg)
-                    log.info(f"[🗺️] Network mapper initialized")
+                    mapper = _MapperClass(vault=self.vault, config=shogun_cfg)
+                    mapper_type = _MapperClass.__name__
+                    log.info(f"[🗺️] Network mapper initialized ({mapper_type})")
                 
                 # Scan subnets
                 all_nodes = {}

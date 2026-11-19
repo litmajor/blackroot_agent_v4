@@ -30,8 +30,12 @@ class EnhancedNetworkMapper(RealNetworkMapper):
     - Anomaly events from actual drift
     """
     
-    def __init__(self, config: Dict = None):
-        super().__init__(config)
+    def __init__(self, vault=None, config: Optional[Dict] = None):
+        # Support both positional config or (vault, config) signatures
+        if isinstance(vault, dict) and config is None:
+            config = vault
+            vault = None
+        super().__init__(vault=vault, config=config)
         self.persistence = ScanPersistence()
         self.baseline_builder = RealBaselineBuilder(self.persistence)
         self.real_baselines = {}  # {ip: RealNodeBaseline}

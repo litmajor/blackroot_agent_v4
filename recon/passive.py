@@ -3,8 +3,22 @@ import os
 import logging
 import requests
 from typing import List, Dict, Any
-from waybackpy import Url
 from requests.adapters import HTTPAdapter, Retry
+
+# waybackpy has an unstable API across versions; guard tightly
+try:
+    # waybackpy >= 3.x uses CDXApi / availability API
+    from waybackpy import WaybackMachineCDXServerAPI as _CDXApi  # type: ignore
+    _WAYBACK_MODE = "cdx"
+except ImportError:
+    try:
+        # waybackpy 2.x used Url() with .snapshots()
+        from waybackpy import Url as _WaybackUrl  # type: ignore
+        _WAYBACK_MODE = "legacy"
+    except ImportError:
+        _CDXApi = None  # type: ignore
+        _WaybackUrl = None  # type: ignore
+        _WAYBACK_MODE = "unavailable"
 
 
 # ---------------------------------------------------------------------
@@ -58,6 +72,10 @@ def wayback_urls(domain: str, limit: int = 500, dedupe: bool = True) -> List[str
     """
     Retrieve historical archive URLs for a given domain from the Wayback Machine.
 
+    Uses CDX Server API (waybackpy >= 3.x) with graceful fallback to legacy
+    Url().snapshots() (waybackpy 2.x) and finally a direct CDX HTTP call when
+    the waybackpy package is unavailable entirely.
+
     Args:
         domain: target domain (e.g., 'example.com')
         limit: maximum number of URLs to return
@@ -67,26 +85,51 @@ def wayback_urls(domain: str, limit: int = 500, dedupe: bool = True) -> List[str
         List of archived URLs (strings).
     """
     urls: List[str] = []
-    try:
-        api = Url(domain, user_agent="Mozilla/5.0")
-        snapshots = api.snapshots()  # generator of snapshot objects
 
-        for i, snapshot in enumerate(snapshots):
-            if i >= limit:
-                break
+    if _WAYBACK_MODE == "unavailable":
+        # Direct CDX API call — no waybackpy needed
+        try:
+            resp = _session.get(
+                "http://web.archive.org/cdx/search/cdx",
+                params={"url": f"*.{domain}", "output": "text", "fl": "original",
+                        "collapse": "urlkey", "limit": limit},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            raw = [line.strip() for line in resp.text.splitlines() if line.strip()]
+            urls = raw[:limit]
+        except Exception as exc:
+            LOGGER.warning("Wayback CDX HTTP fallback error for %s: %s", domain, exc)
+            return []
 
-            # Each snapshot has `.archive_url` (archived link) and `.timestamp`
-            url = getattr(snapshot, "archive_url", None)
-            if url:
-                urls.append(url.strip())
+    elif _WAYBACK_MODE == "cdx":
+        try:
+            cdx = _CDXApi(domain, user_agent="Mozilla/5.0")
+            for i, snap in enumerate(cdx.snapshots()):
+                if i >= limit:
+                    break
+                url = getattr(snap, "archive_url", None) or getattr(snap, "original", None)
+                if url:
+                    urls.append(str(url).strip())
+        except Exception as exc:
+            LOGGER.warning("Wayback CDX error for %s: %s", domain, exc)
+            return []
 
-        if dedupe:
-            # preserve order while deduping
-            urls = list(dict.fromkeys(urls))
+    else:  # legacy
+        try:
+            api = _WaybackUrl(domain, user_agent="Mozilla/5.0")
+            for i, snapshot in enumerate(api.snapshots()):
+                if i >= limit:
+                    break
+                url = getattr(snapshot, "archive_url", None)
+                if url:
+                    urls.append(url.strip())
+        except Exception as exc:
+            LOGGER.warning("Wayback legacy error for %s: %s", domain, exc)
+            return []
 
-        LOGGER.info("Wayback returned %d URLs for %s", len(urls), domain)
-        return urls
+    if dedupe:
+        urls = list(dict.fromkeys(urls))
 
-    except Exception as exc:
-        LOGGER.warning("Wayback error for %s: %s", domain, exc)
-        return []
+    LOGGER.info("Wayback returned %d URLs for %s", len(urls), domain)
+    return urls

