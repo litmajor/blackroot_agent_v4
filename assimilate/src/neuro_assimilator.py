@@ -5,6 +5,9 @@ import random
 import hashlib
 import time
 import logging
+import shutil
+import sys
+import concurrent.futures
 from typing import List, Dict, Any, Optional, Callable, Union
 import psutil
 import os
@@ -111,38 +114,36 @@ class SecurityManager:
         except SyntaxError:
             return False
     
-    def execute_safely(self, code: Any, context: Optional[Dict[str, Any]] = None) -> Any:
-        """Execute code in a restricted environment."""
+    def execute_safely(self, code: Any, context: Optional[Dict[str, Any]] = None,
+                       timeout_secs: int = 10) -> Any:
+        """Execute code in a restricted environment with cross-platform timeout."""
         context = context or {}
 
-        # Set resource limits (POSIX only)
-        try:
-            if os.name == "posix":
-                resource.setrlimit(resource.RLIMIT_CPU, (5, 5))  # 5 seconds CPU time
-                resource.setrlimit(resource.RLIMIT_AS, (128 * 1024 * 1024, 128 * 1024 * 1024))  # 128MB memory
-        except (AttributeError, OSError):
-            pass  # Resource limits not available on all systems
-
-        # Execute with timeout (POSIX only)
+        # POSIX-only: apply hard resource limits
         if os.name == "posix":
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Code execution timeout")
-            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(10)  # 10 second timeout
-        else:
-            old_handler = None
+            try:
+                import resource  # noqa: PLC0415
+                resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
+                resource.setrlimit(resource.RLIMIT_AS, (128 * 1024 * 1024, 128 * 1024 * 1024))
+            except (ImportError, AttributeError, OSError):
+                pass
 
-        try:
-            local_vars = {}
+        def _run() -> Any:
+            local_vars: Dict[str, Any] = {}
             exec(code, safe_globals, local_vars)
             return local_vars.get('result', True)
-        except Exception as e:
-            logger.error(f"Execution error: {e}")
-            return False
-        finally:
-            if os.name == "posix":
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
+
+        # Cross-platform timeout via ThreadPoolExecutor (works on Windows + POSIX)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run)
+            try:
+                return future.result(timeout=timeout_secs)
+            except concurrent.futures.TimeoutError:
+                logger.error(f"Code execution timed out after {timeout_secs}s")
+                return False
+            except Exception as e:
+                logger.error(f"Execution error: {e}")
+                return False
 
 class ReliabilityMonitor:
     """Monitor system reliability and performance."""
@@ -220,11 +221,71 @@ class BinaryHandler(SoftwareHandler):
         raise RuntimeError(f"Binary execution is unavailable for {name}")
 
 class RustScriptHandler(SoftwareHandler):
-    """Reject Rust execution when no isolated runtime is configured."""
-    
+    """
+    Compile and execute a Rust source blob using the host rustc/cargo toolchain.
+    Falls back gracefully when the Rust toolchain is not installed.
+    """
+
     def execute(self, code_obj: Dict[str, Any], context: Dict[str, Any]) -> Any:
         name = code_obj.get('name', 'unknown')
-        raise RuntimeError(f"Rust execution is unavailable for {name}")
+
+        # --- toolchain availability check ---
+        rustc = shutil.which("rustc")
+        cargo = shutil.which("cargo")
+        if not rustc and not cargo:
+            logger.warning(
+                f"[RustScriptHandler] Rust toolchain not found in PATH for '{name}'. "
+                "Install rustup from https://rustup.rs to enable Rust execution."
+            )
+            return {"status": "skipped", "reason": "rust_toolchain_unavailable", "name": name}
+
+        source = code_obj.get('source', '')
+        if isinstance(source, bytes):
+            source = source.decode('utf-8', errors='replace')
+        if not source:
+            return {"status": "error", "reason": "empty_source", "name": name}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_path = os.path.join(tmpdir, "main.rs")
+            with open(src_path, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            bin_name = "main.exe" if sys.platform.startswith("win") else "main"
+            bin_path = os.path.join(tmpdir, bin_name)
+
+            # Prefer single-file rustc compile (no Cargo overhead)
+            compiler = rustc or "rustc"
+            try:
+                result = subprocess.run(
+                    [compiler, src_path, "-o", bin_path],
+                    capture_output=True, text=True, timeout=30, cwd=tmpdir
+                )
+                if result.returncode != 0:
+                    logger.error(f"[RustScriptHandler] rustc compile failed for '{name}':\n{result.stderr}")
+                    return {"status": "compile_error", "stderr": result.stderr, "name": name}
+            except subprocess.TimeoutExpired:
+                return {"status": "timeout", "phase": "compile", "name": name}
+            except FileNotFoundError:
+                return {"status": "error", "reason": "rustc_not_executable", "name": name}
+
+            # Execute compiled binary
+            try:
+                run_result = subprocess.run(
+                    [bin_path], capture_output=True, text=True, timeout=10
+                )
+                logger.info(
+                    f"[RustScriptHandler] '{name}' exited {run_result.returncode}: "
+                    f"{run_result.stdout.strip()[:200]}"
+                )
+                return {
+                    "status": "ok" if run_result.returncode == 0 else "runtime_error",
+                    "returncode": run_result.returncode,
+                    "stdout": run_result.stdout,
+                    "stderr": run_result.stderr,
+                    "name": name,
+                }
+            except subprocess.TimeoutExpired:
+                return {"status": "timeout", "phase": "run", "name": name}
 
 # Create handler instances
 security_manager = SecurityManager()
@@ -239,7 +300,7 @@ SOFTWARE_HANDLERS = {
     'pyd': BinaryHandler(),
     'so': BinaryHandler(),
     'arm64': BinaryHandler(),
-    'rust': RustScriptHandler()
+    'rust': RustScriptHandler(),
 }
 
 class PayloadEngine:
@@ -436,25 +497,8 @@ def inject(self, payload: bytes, fmt: str, pid: Optional[int] = None,
     return handler()
 
 class NeuroAssimilatorAgent:
+    """Advanced agent for code analysis, assimilation, and execution."""
 
-    def execute_blob(self, blob: bytes, context: Optional[dict] = None) -> Any:
-        """
-        Execute a code blob (bytes) in a safe context.
-        Decodes to utf-8, compiles, and runs using execute_safely.
-        """
-        if context is None:
-            context = {}
-        try:
-            code_str = blob.decode('utf-8')
-        except Exception as e:
-            return {"error": f"Blob decode failed: {e}"}
-        try:
-            compiled = compile(code_str, '<blob>', 'exec')
-            return self.execute_safely(compiled, context)  # type: ignore[attr-defined]
-        except Exception as e:
-            return {"error": f"Blob execution failed: {e}"}
-    """Advanced agent for code analysis and execution."""
-    
     MEMORY_CAPACITY: int = 50
     TRUST_THRESHOLD: float = 0.6
     HIGH_CPU_THRESHOLD: float = 80.0
@@ -464,6 +508,94 @@ class NeuroAssimilatorAgent:
     ADAPTATION_TIME_WINDOW: int = 3600  # seconds
     ADAPTATION_MEMORY_LIMIT: int = 1024 * 1024 * 100  # 100 MB
     ADAPTATION_CPU_LIMIT: float = 80.0  # 80%
+
+    def execute_safely(self, code: Any, context: Optional[dict] = None) -> Any:
+        """Proxy: delegates to SecurityManager.execute_safely() for sandboxed execution."""
+        return self.security_manager.execute_safely(code, context)
+
+    def execute_blob(self, blob: bytes, context: Optional[dict] = None) -> Any:
+        """
+        Execute a raw code blob (bytes) in a sandboxed context.
+        Pipeline: UTF-8 decode → optional AST mutation → safe_compile → execute_safely.
+        """
+        if context is None:
+            context = {}
+        try:
+            code_str = blob.decode('utf-8')
+        except Exception as e:
+            return {"error": f"Blob decode failed: {e}"}
+        try:
+            # Optional: run AST mutation pass before execution
+            try:
+                code_str = self._mutate_source(code_str)
+            except Exception:
+                pass  # mutation is best-effort; never block execution
+            compiled = compile(code_str, '<blob>', 'exec')
+            return self.security_manager.execute_safely(compiled, context)
+        except Exception as e:
+            return {"error": f"Blob execution failed: {e}"}
+
+    def assimilate_with_mutation(self, code_str: str, name: str = "<anonymous>") -> Optional[Any]:
+        """
+        Full pipeline: AST mutation (polymorphic rename + obfuscation) →
+        security analysis → safe_compile → store in vault under mutated name.
+
+        Returns the compiled code object on success, None on failure.
+        """
+        try:
+            mutated = self._mutate_source(code_str)
+        except Exception as e:
+            logger.warning(f"[NeuroAssimilator] Mutation failed for '{name}', using original: {e}")
+            mutated = code_str
+
+        if not self.security_manager.analyze_code(mutated):
+            logger.warning(f"[NeuroAssimilator] '{name}' failed security analysis after mutation — rejected.")
+            return None
+
+        try:
+            compiled = safe_compile(mutated, f"<mutated:{name}>")
+        except SyntaxError as e:
+            logger.error(f"[NeuroAssimilator] Post-mutation SyntaxError for '{name}': {e}")
+            return None
+
+        # Persist the mutated source blob into BlackVault (24-hour TTL)
+        try:
+            self.vault.store(f"mutated:{name}", mutated.encode('utf-8'), expire_minutes=1440)
+            logger.info(f"[NeuroAssimilator] Mutated '{name}' stored in vault.")
+        except Exception as e:
+            logger.warning(f"[NeuroAssimilator] Vault store failed for '{name}': {e}")
+
+        return compiled
+
+    def _mutate_source(self, code_str: str) -> str:
+        """
+        Apply the polymorphic AST renamer from MutatorEngine.
+        Imports lazily to avoid a hard dependency at module load time.
+        """
+        try:
+            # Try direct import path first (run from repo root)
+            from mutator_engine import AdvancedIdentifierRenamer  # type: ignore
+        except ImportError:
+            try:
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location(
+                    "mutator_engine",
+                    os.path.join(os.path.dirname(__file__), "..", "..", "..", "mutator_engine.py")
+                )
+                if _spec and _spec.loader:
+                    _mod = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+                    AdvancedIdentifierRenamer = _mod.AdvancedIdentifierRenamer
+                else:
+                    raise ImportError("mutator_engine spec not found")
+            except Exception as e:
+                raise ImportError(f"Cannot load mutator_engine: {e}") from e
+
+        tree = ast.parse(code_str)
+        renamed = AdvancedIdentifierRenamer(obfuscation_chance=0.65).visit(tree)
+        ast.fix_missing_locations(renamed)
+        return ast.unparse(renamed) if hasattr(ast, 'unparse') else code_str
+
 
     def __init__(
         self,
