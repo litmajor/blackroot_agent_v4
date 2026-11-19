@@ -1093,3 +1093,15 @@ Integration points:
 - Monitoring, recovery, audit, and consensus via verify_archive_integrity and check_consensus
 - Anchoring and Merkle verification for compliance
 """
+
+_global_archivist: Optional[ArchivistAgent] = None
+_archivist_lock = threading.Lock()
+
+def get_archivist(agent_id: str = "BR-ARCHIVIST", secret_key: str = "blackroot_archivist_default_key") -> ArchivistAgent:
+    """Retrieve or initialize the global Archivist singleton."""
+    global _global_archivist
+    if _global_archivist is None:
+        with _archivist_lock:
+            if _global_archivist is None:
+                _global_archivist = ArchivistAgent(agent_id=agent_id, secret_key=secret_key)
+    return _global_archivist

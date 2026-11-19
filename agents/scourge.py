@@ -12,6 +12,7 @@ import json
 import time
 import uuid
 import logging
+import threading
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
@@ -243,6 +244,19 @@ class FallmanAgent:
             self.logger.error(f"Failure absorption failed: {e}")
             await self._consider_self_sacrifice()
             raise
+
+    def record_failure(self, source_agent: str, failure_type: FailureType, description: str, severity: int = 1) -> str:
+        """Synchronous failure ingestion for non-async caller agents."""
+        event = FailureEvent(
+            source_agent=source_agent,
+            failure_type=failure_type,
+            description=description,
+            severity=severity
+        )
+        self.downfall_logs.append(event)
+        self.current_blame_load += severity
+        self.logger.info(f"[FAL-SCOURGE] Recorded failure from {source_agent}: {description} (severity={severity})")
+        return event.id
 
     async def _contain_failure(self, failure_event: FailureEvent) -> Dict[str, Any]:
         """Quarantine failing components to prevent cascade damage"""
@@ -686,6 +700,18 @@ async def main():
     print(f"\nSacrifice assessment: {json.dumps(sacrifice_assessment, indent=2, default=str)}")
     
     print(f"\nFinal status: {fallman._get_status_report()}")
+
+_global_fallman: Optional[FallmanAgent] = None
+_fallman_lock = threading.Lock()
+
+def get_fallman(agent_id: str = "FAL-SCOURGE") -> FallmanAgent:
+    """Retrieve or initialize the global Fallman (Scourge) failure manager singleton."""
+    global _global_fallman
+    if _global_fallman is None:
+        with _fallman_lock:
+            if _global_fallman is None:
+                _global_fallman = FallmanAgent(agent_id=agent_id)
+    return _global_fallman
 
 if __name__ == "__main__":
     asyncio.run(main())

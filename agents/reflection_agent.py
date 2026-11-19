@@ -117,6 +117,16 @@ class ReflectionAgent(BaseAgent):
         if redis:
             redis.publish("reflection", json.dumps(snapshot, separators=(",", ":")))
 
+        # Feedback loop: Push insights into BehaviorAdapter
+        behavior_adapter = getattr(self.kernel, "behaviour", getattr(self.kernel, "behavior", None))
+        if behavior_adapter and hasattr(behavior_adapter, "adapt_based_on_beliefs"):
+            beliefs = snapshot.get("beliefs", {})
+            if beliefs:
+                try:
+                    behavior_adapter.adapt_based_on_beliefs(beliefs)
+                except Exception as b_err:
+                    log.debug("BehaviorAdapter feedback bypassed: %s", b_err)
+
         self._maybe_log(snapshot)
 
     # ------------------------------------------------------------------

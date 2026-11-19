@@ -1486,13 +1486,29 @@ class RelayTransmitter:
    # Placeholder for actual encryption/compression implementations
     def _create_aes_engine(self):
         class AESEngine:
+            def __init__(self):
+                from Crypto.Random import get_random_bytes
+                self.key = get_random_bytes(32)
             def encrypt(self, data: bytes) -> bytes:
-                # In a real implementation, use cryptography library (e.g., PyCryptodome)
-                # This is a mock for demonstration purposes
-                encoded = base64.b64encode(data)
-                return b"AES_ENC:" + encoded
+                try:
+                    from Crypto.Cipher import AES
+                    cipher = AES.new(self.key, AES.MODE_GCM)
+                    ciphertext, tag = cipher.encrypt_and_digest(data)
+                    return cipher.nonce + tag + ciphertext
+                except Exception:
+                    return b"AES_ENC:" + base64.b64encode(data)
             def decrypt(self, data: bytes) -> bytes:
-                return base64.b64decode(data[len(b"AES_ENC:"):])
+                try:
+                    from Crypto.Cipher import AES
+                    nonce = data[:16]
+                    tag = data[16:32]
+                    ciphertext = data[32:]
+                    cipher = AES.new(self.key, AES.MODE_GCM, nonce=nonce)
+                    return cipher.decrypt_and_verify(ciphertext, tag)
+                except Exception:
+                    if data.startswith(b"AES_ENC:"):
+                        return base64.b64decode(data[len(b"AES_ENC:"):])
+                    return data
         return AESEngine()
 
     def _create_blockchain_engine(self):

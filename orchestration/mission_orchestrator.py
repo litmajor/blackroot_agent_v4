@@ -28,7 +28,10 @@ from enum import Enum
 from typing import Dict, List, Optional, Any, Callable, Union, TYPE_CHECKING, cast
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-import redis
+try:
+    import redis
+except ImportError:
+    redis = None
 
 # Import mission profile system for type checking and runtime
 if TYPE_CHECKING:
@@ -180,7 +183,7 @@ class MissionOrchestrator:
         self.redis_client = None
         
         # Try Redis for persistence
-        if use_redis:
+        if use_redis and redis:
             try:
                 self.redis_client = redis.Redis(
                     host=self.REDIS_HOST,
@@ -250,6 +253,12 @@ class MissionOrchestrator:
                     agent_type="ExfiltratorAgent",
                     parameters={"target": target},
                     dependencies=["EXTRACT"]
+                ),
+                MissionStage(
+                    name="CLEANUP",
+                    agent_type="DefilerAgent",
+                    parameters={"target": target, "aggressive": True},
+                    dependencies=["EXFIL"]
                 )
             ]
             logger.info(f"[🎯] Mission created (legacy mode): {goal} (ID: {mission.mission_id[:8]}...)")
@@ -329,6 +338,7 @@ class MissionOrchestrator:
             'EXTRACT': ('ExtractorAgent', ['INFILTRATE']),
             'EXFIL': ('ExfiltratorAgent', ['EXTRACT']),
             'POST_ESCALATION': ('PostEscalationAgent', ['ESCALATE']),
+            'CLEANUP': ('DefilerAgent', ['EXFIL']),
             'SENSOR': ('SensorAgent', ['SCAN']),
             'PROPAGATION': ('PropagationAgent', ['SENSOR']),
             'REPLICATE': ('ReplicatorAgent', ['PROPAGATION']),
@@ -344,12 +354,12 @@ class MissionOrchestrator:
             MissionType.FOOTHOLD: ['SCAN', 'INFILTRATE', 'ESCALATE', 'EXTRACT'],
             MissionType.ESCALATE: ['ESCALATE', 'EXTRACT'],
             MissionType.INFILTRATE: ['SCAN', 'ESCALATE', 'INFILTRATE', 'POST_ESCALATION'],
-            MissionType.EXTRACT: ['SCAN', 'ESCALATE', 'INFILTRATE', 'EXTRACT', 'EXFIL'],
+            MissionType.EXTRACT: ['SCAN', 'ESCALATE', 'INFILTRATE', 'EXTRACT', 'EXFIL', 'CLEANUP'],
             MissionType.PROPAGATE: ['SCAN', 'SENSOR', 'PROPAGATION', 'REPLICATE'],
             MissionType.DOMINATE: ['SCAN', 'SENSOR', 'PROPAGATION', 'REPLICATE', 'LEARNING', 'TARGETING'],
             MissionType.EXECUTE: ['SCAN', 'EXECUTE'],
             MissionType.MAINTAIN: ['INFILTRATE', 'EVASION', 'HIBERNATION'],
-            MissionType.EXFIL: ['EXFIL'],
+            MissionType.EXFIL: ['EXFIL', 'CLEANUP'],
         }
         
         # Get the stage sequence for this mission type

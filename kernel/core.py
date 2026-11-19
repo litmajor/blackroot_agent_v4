@@ -68,7 +68,33 @@ except ModuleNotFoundError:
     from mutator_engine import MutatorEngine
     from recon.scanner import ReconModule
 from Crypto.Random import get_random_bytes
-from redis import Redis
+try:
+    from redis import Redis
+except ImportError:
+    class DummyRedis:
+        is_dummy = True
+        def pubsub(self):
+            class DummyPubSub:
+                def subscribe(self, *a, **k): pass
+                def unsubscribe(self, *a, **k): pass
+                def listen(self): return iter([])
+                def get_message(self, *a, **k): return None
+                def close(self): pass
+            return DummyPubSub()
+        def ping(self): return False
+        def get(self, k): return None
+        def set(self, k, v, ex=None): return False
+        def delete(self, k): return False
+        def exists(self, k): return False
+        def lpush(self, k, *v): return 0
+        def lrange(self, k, s, e): return []
+        def publish(self, ch, msg): return 0
+        def incrby(self, k, a): return 0
+        def hset(self, k, m=None, **kw): return 0
+        def hget(self, k, f): return None
+        def setex(self, k, t, v): return False
+    Redis = DummyRedis  # type: ignore
+
 from decimal import Decimal
 import json
 from typing import TYPE_CHECKING

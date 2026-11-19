@@ -27,7 +27,14 @@ from world_state import WorldState, OperationalPhase
 from strategy_engine import StrategyEngine, Strategy
 from causal_simulator import CausalSimulator
 from confidence_engine import ConfidenceEngine
-from decision_fatigue import DecisionFatigueEngine
+try:
+    from decision_fatigue import DecisionFatigueEngine
+except ImportError:
+    try:
+        from scripts.decision_fatigue import DecisionFatigueEngine
+    except ImportError:
+        class DecisionFatigueEngine:  # type: ignore
+            def __init__(self, *args, **kwargs): pass
 from uncertainty_behavior import UncertaintyBehaviorEngine
 from operational_causal_graphs import build_phase_simulators
 

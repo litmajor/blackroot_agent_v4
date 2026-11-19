@@ -1,0 +1,51 @@
+# Blackroot Tactical Framework v4.5 - Package Requirements
+# =========================================================
+
+# Core Framework & Async API
+fastapi>=0.100.0
+uvicorn>=0.20.0
+websockets>=12.0
+requests>=2.28.0
+urllib3>=1.26.0
+python-dotenv>=1.0.0
+pyyaml>=6.0
+pydantic>=2.0.0
+
+# Security, Cryptography & Identity
+pycryptodome>=3.18.0
+cryptography>=41.0.0
+pyjwt>=2.8.0
+pynacl>=1.5.0
+
+# Windows System & Privilege Escalation (Windows Host)
+pywin32>=306
+WMI>=1.5.1
+psutil>=5.9.0
+pefile>=2023.2.7
+
+# Network Protocols, Reconnaissance & Propagation
+impacket>=0.11.0
+scapy>=2.5.0
+paramiko>=3.0.0
+dnspython>=2.4.0
+dnstwist>=20240101
+python-nmap>=0.7.1
+mac-vendor-lookup>=0.1.12
+netifaces>=0.11.0
+zeroconf>=0.131.0
+beautifulsoup4>=4.12.0
+
+# Distributed Mesh, Storage & Cache
+redis>=4.5.0
+aioredis>=2.0.0
+
+# Blockchain & Economic Settlement (BEL Layer / Phase 7 Bridge)
+web3>=6.0.0
+
+# Threat Intelligence, Analytics & Terminal UI
+numpy>=1.24.0
+rich>=13.0.0
+tabulate>=0.9.0
+
+# Testing
+pytest>=7.0.0

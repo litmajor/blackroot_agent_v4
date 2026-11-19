@@ -2676,6 +2676,21 @@ class PrivescEngine:
                     )
                 except Exception as e:
                     self.logger.warning(f"Failed to store result in vault: {e}")
+
+            # Trigger Post-Escalation pipeline automatically upon successful privilege acquisition
+            try:
+                from agents.post_escalation_agent_v2 import PostEscalationAgent
+                post_agent = PostEscalationAgent(kernel=getattr(self, 'kernel', None))
+                esc_payload = {
+                    'technique': result.technique_used,
+                    'privilege': result.elevated_privilege,
+                    'timestamp': result.timestamp,
+                    'target': 'local'
+                }
+                post_summary = post_agent.execute_workflow(esc_payload)
+                self.logger.info(f"[🎯] Post-escalation automated pipeline complete: {post_summary}")
+            except Exception as e:
+                self.logger.debug(f"Post-escalation workflow invocation: {e}")
         elif result:
             self.escalation_attempts.append(result)
             self.logger.warning(f"✗ ALL TECHNIQUES EXHAUSTED - Fallthrough chain ended without success")

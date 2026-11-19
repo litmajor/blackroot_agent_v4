@@ -343,6 +343,27 @@ class ACCLedger:
                     self.burned_total += burn_share          # 20% is burned
                     self._log_transaction(agent_id, amount, f"{description} (80% treasury, 20% burned)", wallet.remaining_budget, "spent")
                     self._log_transaction(agent_id, burn_share, "Root burned (scarcity sink)", wallet.remaining_budget, "burned")
+                    
+                    # S8: Archivist Merkle Audit Integration
+                    try:
+                        from agents.archivist import get_archivist, RecordType, Priority
+                        arch = get_archivist()
+                        arch.archive_record(
+                            agent_code=agent_id,
+                            record_type=RecordType.TRANSACTION,
+                            data={
+                                'tx_id': tx.tx_id,
+                                'amount': str(amount),
+                                'treasury_share': str(treasury_share),
+                                'burn_share': str(burn_share),
+                                'description': description,
+                                'remaining_budget': str(wallet.remaining_budget)
+                            },
+                            priority=Priority.NORMAL
+                        )
+                    except Exception as arch_err:
+                        pass
+
                     return True, f"Transaction {tx.tx_id} executed successfully (80% to treasury, 20% burned)"
                 else:
                     return False, "Transaction execution failed"
