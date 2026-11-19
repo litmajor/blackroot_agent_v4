@@ -19,6 +19,10 @@ import logging
 import pickle
 import time
 import uuid
+import sys
+import os
+import shutil
+import importlib
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Any, Callable, Set
@@ -158,37 +162,83 @@ class PatchRepairStrategy(RepairStrategy):
         return True
     
     async def _apply_patch_safely(self, ticket: RepairTicket, context: Dict) -> bool:
-        """Apply patch with rollback capability"""
+        """Apply patch with hot-reload and atomic rollback capability"""
+        target_file = None
+        backup_path = None
         try:
-            # Create backup point
-            backup_id = f"pre-patch-{ticket.id}"
-            logging.info(f"Creating backup {backup_id} before patch")
-            
-            # Simulate patch application
-            await asyncio.sleep(1)
-            
-            # Verify patch success
+            patch_data = getattr(ticket, 'data', {}) or {}
+            target_file = patch_data.get('target_file') or patch_data.get('file_path')
+            patch_code = patch_data.get('patch_content') or patch_data.get('code')
+            module_name = patch_data.get('module_name')
+
+            # 1. Physical file patch with atomic backup
+            if target_file and os.path.isfile(target_file):
+                backup_path = f"{target_file}.bak.{ticket.id}"
+                shutil.copyfile(target_file, backup_path)
+                logging.info(f"Created file backup snapshot: {backup_path}")
+
+                if patch_code:
+                    # Validate syntax before writing
+                    compile(patch_code, target_file, 'exec')
+                    with open(target_file, 'w', encoding='utf-8') as fp:
+                        fp.write(patch_code)
+                    logging.info(f"Applied physical code patch to {target_file}")
+
+            # 2. In-memory hot-reload via importlib
+            if module_name and module_name in sys.modules:
+                logging.info(f"Hot-reloading in-memory module: {module_name}")
+                importlib.reload(sys.modules[module_name])
+
+            # 3. Verify patch
             if self._verify_patch_application(ticket):
-                logging.info(f"Patch successfully applied to {ticket.node_id}")
+                logging.info(f"Patch successfully verified for {ticket.node_id}")
+                if backup_path and os.path.exists(backup_path):
+                    # Clean up temporary backup after success
+                    try:
+                        os.remove(backup_path)
+                    except Exception:
+                        pass
                 return True
             else:
                 logging.warning(f"Patch verification failed, rolling back {ticket.node_id}")
-                await self._rollback_patch(ticket, backup_id)
+                await self._rollback_patch(ticket, backup_path or f"pre-patch-{ticket.id}")
                 return False
-                
+
         except Exception as e:
-            logging.error(f"Patch application failed: {e}")
+            logging.error(f"Patch application failed for {ticket.node_id}: {e}")
+            if backup_path and target_file and os.path.exists(backup_path):
+                shutil.copyfile(backup_path, target_file)
+                logging.info(f"Emergency rollback restored {target_file} from {backup_path}")
             return False
-    
+
     def _verify_patch_application(self, ticket: RepairTicket) -> bool:
-        """Verify that patch was applied correctly"""
-        # Simulate verification
+        """Verify that patch was applied correctly and target is functional"""
+        patch_data = getattr(ticket, 'data', {}) or {}
+        target_file = patch_data.get('target_file') or patch_data.get('file_path')
+        if target_file and os.path.isfile(target_file):
+            try:
+                with open(target_file, 'r', encoding='utf-8') as fp:
+                    compile(fp.read(), target_file, 'exec')
+                return True
+            except Exception as e:
+                logging.error(f"Patch verification compile error: {e}")
+                return False
         return True
-    
+
     async def _rollback_patch(self, ticket: RepairTicket, backup_id: str):
         """Rollback patch if verification fails"""
-        logging.info(f"Rolling back patch for {ticket.node_id} using backup {backup_id}")
-        await asyncio.sleep(1)
+        logging.info(f"Rolling back patch for {ticket.node_id} using {backup_id}")
+        if os.path.isfile(backup_id):
+            patch_data = getattr(ticket, 'data', {}) or {}
+            target_file = patch_data.get('target_file') or patch_data.get('file_path')
+            if target_file:
+                shutil.copyfile(backup_id, target_file)
+                try:
+                    os.remove(backup_id)
+                except Exception:
+                    pass
+                logging.info(f"Restored original file {target_file}")
+        await asyncio.sleep(0.5)
 
 class RestoreRepairStrategy(RepairStrategy):
     """Strategy for restoring nodes from snapshots"""

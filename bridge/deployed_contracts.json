@@ -1,0 +1,32 @@
+{
+  "network": {
+    "chain_id": 31337,
+    "rpc_url": "http://127.0.0.1:8545",
+    "timestamp": 1795120260,
+    "status": "SIMULATED_MANIFEST"
+  },
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "contracts": {
+    "RROOTToken": {
+      "address": "0x2ed1ac8ed30439d141741a6d15b00673376f60df",
+      "name": "Rooted BEL Bridge Token",
+      "symbol": "rROOT",
+      "decimals": 6,
+      "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "bridge": "0xb0dfd5ef7be037bfb9cccac28a50866732673484"
+    },
+    "RROOTBridge": {
+      "address": "0xb0dfd5ef7be037bfb9cccac28a50866732673484",
+      "token": "0x2ed1ac8ed30439d141741a6d15b00673376f60df",
+      "fee_treasury": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "threshold": 2,
+      "validators": [
+        "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+        "0x9965507D1a55bcC7856379f8379fACB42BBC5563"
+      ],
+      "daily_volume_limit": 25000,
+      "deposit_fee_bps": 30
+    }
+  }
+}

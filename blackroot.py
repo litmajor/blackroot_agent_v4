@@ -136,6 +136,20 @@ def cmd_bridge(args):
     print("              CROSS-CHAIN BRIDGE & SOLVENCY REPORT               ")
     print("=" * 68)
 
+    # 1. Deployment Mode (S17)
+    if getattr(args, "deploy", False):
+        from bridge.deploy import deploy_bridge_contracts
+        manifest = deploy_bridge_contracts(
+            rpc_url=getattr(args, "rpc_url", None),
+            dry_run=not bool(getattr(args, "rpc_url", None))
+        )
+        print(f"\n  [DEPLOYMENT] Status:   {manifest['network']['status']}")
+        print(f"  RROOTToken Address:    {manifest['contracts']['RROOTToken']['address']}")
+        print(f"  RROOTBridge Address:   {manifest['contracts']['RROOTBridge']['address']}")
+        print(f"  Validators Threshold:  {manifest['contracts']['RROOTBridge']['threshold']}-of-{len(manifest['contracts']['RROOTBridge']['validators'])}")
+        print("\n" + "=" * 68)
+        return
+
     from bridge.oracle import BridgeOracle, MockBELLedger
     from bridge.bridge_client import BridgeClient
 
@@ -345,10 +359,11 @@ def cmd_simulate(args):
     bridge_client = BridgeClient(oracle)
 
     # Simulate deposit of 1,000 rROOT
+    sim_nonce = int(time.time() * 1000) % 10000000
     dep_resp = bridge_client.deposit(
-        tx_hash="0xsim_deposit_tx",
+        tx_hash=f"0xsim_deposit_{sim_nonce}",
         log_index=0,
-        deposit_nonce=1,
+        deposit_nonce=sim_nonce,
         sender="0xoperator_eth",
         agent_id="PROPAGATION-01",
         amount=1000.0,
@@ -409,6 +424,8 @@ def main():
     p_bridge = subparsers.add_parser("bridge", help="Cross-chain bridge solvency and status")
     p_bridge.add_argument("--solvency", action="store_true", help="Verify on-chain vs internal backing")
     p_bridge.add_argument("--circulating", type=float, default=0.0, help="Simulated on-chain circulating rROOT")
+    p_bridge.add_argument("--deploy", action="store_true", help="Execute or generate contract deployment manifest")
+    p_bridge.add_argument("--rpc-url", default=None, help="Target EVM JSON-RPC URL")
     p_bridge.set_defaults(func=cmd_bridge)
 
     # start
