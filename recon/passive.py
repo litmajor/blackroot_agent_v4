@@ -5,6 +5,8 @@ import requests
 from typing import List, Dict, Any
 from requests.adapters import HTTPAdapter, Retry
 
+from .resilience import CircuitBreakerRegistry
+
 # waybackpy has an unstable API across versions; guard tightly
 try:
     # waybackpy >= 3.x uses CDXApi / availability API
@@ -37,6 +39,10 @@ _session = requests.Session()
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 _session.mount("https://", HTTPAdapter(max_retries=retries))
 
+# Named circuit breakers — shared across all calls within this process
+_shodan_cb  = CircuitBreakerRegistry.get("shodan",  failure_limit=3, timeout=120)
+_wayback_cb = CircuitBreakerRegistry.get("wayback", failure_limit=3, timeout=120)
+
 
 def shodan_lookup(domain: str) -> List[Dict[str, Any]]:
     """
@@ -50,7 +56,8 @@ def shodan_lookup(domain: str) -> List[Dict[str, Any]]:
         return []
 
     try:
-        resp = _session.get(
+        resp = _shodan_cb.call(
+            _session.get,
             "https://api.shodan.io/shodan/host/search",
             params={"key": SHODAN_API_KEY, "query": f"hostname:{domain}"},
             timeout=10,
@@ -60,6 +67,9 @@ def shodan_lookup(domain: str) -> List[Dict[str, Any]]:
         matches = data.get("matches", [])
         LOGGER.info("Shodan returned %d results for %s", len(matches), domain)
         return matches
+    except RuntimeError:
+        LOGGER.warning("Shodan circuit OPEN for %s — skipping", domain)
+        return []
     except requests.exceptions.RequestException as exc:
         LOGGER.warning("Shodan network error for %s: %s", domain, exc)
         return []
@@ -89,7 +99,8 @@ def wayback_urls(domain: str, limit: int = 500, dedupe: bool = True) -> List[str
     if _WAYBACK_MODE == "unavailable":
         # Direct CDX API call — no waybackpy needed
         try:
-            resp = _session.get(
+            resp = _wayback_cb.call(
+                _session.get,
                 "http://web.archive.org/cdx/search/cdx",
                 params={"url": f"*.{domain}", "output": "text", "fl": "original",
                         "collapse": "urlkey", "limit": limit},
@@ -98,6 +109,9 @@ def wayback_urls(domain: str, limit: int = 500, dedupe: bool = True) -> List[str
             resp.raise_for_status()
             raw = [line.strip() for line in resp.text.splitlines() if line.strip()]
             urls = raw[:limit]
+        except RuntimeError:
+            LOGGER.warning("Wayback circuit OPEN for %s — skipping", domain)
+            return []
         except Exception as exc:
             LOGGER.warning("Wayback CDX HTTP fallback error for %s: %s", domain, exc)
             return []

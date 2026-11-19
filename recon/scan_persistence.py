@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Scan Persistence Layer (Redis + BlackVault)
-- Saves scan results to Redis (ephemeral, no disk forensics) with 48hr TTL
-- Archives to BlackVault (encrypted, versioned) for long-term retention
-- Loads historical scans for comparison from Redis
-- Computes drift between scans
-- Enables anomaly detection based on real historical data
-- Zero disk forensic footprint during operation
+Scan Persistence Layer (Redis → SQLite WAL → in-memory)
+- Primary:    Redis (ephemeral, 48 h TTL, no disk forensics)
+- Fallback:   SQLite WAL at a temp-dir path (survives agent restarts)
+- Last-resort: in-memory dict (lost on exit, used only when both above fail)
+- Archives to BlackVault (encrypted, versioned) when enabled
+- Enables drift detection and anomaly events from historical data
+
+SQLite DB path: env SCAN_PERSISTENCE_DB  or  <tempdir>/.blackroot_scan_cache.db
 """
 
 import json
 import os
-from datetime import datetime
+import sqlite3
+import tempfile
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -19,6 +23,105 @@ import logging
 import redis
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# SQLite WAL backend — used when Redis is unavailable
+# ------------------------------------------------------------------
+
+_DEFAULT_DB_PATH = os.environ.get(
+    "SCAN_PERSISTENCE_DB",
+    os.path.join(tempfile.gettempdir(), ".blackroot_scan_cache.db"),
+)
+
+
+class _SQLiteBackend:
+    """
+    Thread-safe SQLite WAL backend for scan persistence.
+    Survives process restarts; kept in temp dir by default.
+    Schema is minimal — one row per scan record.
+    """
+
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS scan_history (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        subnet      TEXT    NOT NULL,
+        timestamp   TEXT    NOT NULL,
+        record_json TEXT    NOT NULL,
+        created_at  REAL    DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_subnet_ts
+        ON scan_history(subnet, timestamp DESC);
+    """
+
+    def __init__(self, db_path: str = _DEFAULT_DB_PATH):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.executescript(self._SCHEMA)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def save(self, record: "ScanRecord") -> None:
+        blob = json.dumps(asdict(record), default=str)
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "INSERT INTO scan_history (subnet, timestamp, record_json) VALUES (?,?,?)",
+                    (record.subnet, record.timestamp, blob),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def load(self, subnet: str, limit: int = 10) -> List["ScanRecord"]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "SELECT record_json FROM scan_history "
+                    "WHERE subnet=? ORDER BY timestamp DESC LIMIT ?",
+                    (subnet, limit),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+        records = []
+        for (blob,) in rows:
+            try:
+                records.append(ScanRecord(**json.loads(blob)))
+            except Exception as exc:
+                logger.warning("[SQLite] Failed to deserialize row: %s", exc)
+        return records
+
+    def vacuum(self, days: int = 7) -> int:
+        """Remove records older than *days* days. Returns number deleted."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM scan_history WHERE timestamp < ?", (cutoff,)
+                )
+                deleted = cur.rowcount
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+        return deleted
 
 # Attempt to import BlackVault for archival
 try:
@@ -75,12 +178,31 @@ class ScanPersistence:
             )
             self.redis_client.ping()
             self.redis_available = True
+            self.backend = "redis"
+            self._sqlite = None
+            self._db_path = None
             logger.info(f"[✓] Redis persistence initialized: {self.REDIS_HOST}:{self.REDIS_PORT}")
         except Exception as e:
             self.redis_available = False
-            logger.error(f"[!] Redis unavailable: {e}; reverting to in-memory only")
             self.redis_client = None
-        
+            # --- SQLite WAL fallback ---
+            try:
+                self._sqlite = _SQLiteBackend()
+                self._db_path = self._sqlite.db_path
+                self.backend = "sqlite"
+                logger.warning(
+                    "[!] Redis unavailable (%s); falling back to SQLite WAL at %s",
+                    e, self._db_path,
+                )
+            except Exception as sq_exc:
+                self._sqlite = None
+                self._db_path = None
+                self.backend = "memory"
+                logger.error(
+                    "[!] SQLite WAL init failed (%s); using in-memory only (data lost on restart)",
+                    sq_exc,
+                )
+
         self.archive_to_vault = archive_to_blackvault and BLACKVAULT_AVAILABLE
         if self.archive_to_vault:
             try:
@@ -89,8 +211,8 @@ class ScanPersistence:
             except Exception as e:
                 self.archive_to_vault = False
                 logger.warning(f"[!] BlackVault init failed: {e}")
-        
-        # In-memory fallback (if Redis unavailable)
+
+        # In-memory fallback (last resort when Redis AND SQLite are both unavailable)
         self.memory_cache: Dict[str, List[ScanRecord]] = {}
     
     def _sanitize_subnet(self, subnet: str) -> str:
@@ -106,64 +228,79 @@ class ScanPersistence:
         data_dict = json.loads(data)
         return ScanRecord(**data_dict)
     
-    def save_scan(self, subnet: str, hosts: Dict, scan_duration: float) -> str:
+    def save_scan(self, subnet_or_record, hosts: Optional[Dict] = None, scan_duration: float = 0.0) -> str:
         """
-        Save scan results to Redis (no disk forensics).
-        
+        Save scan results.  Priority: Redis → SQLite WAL → in-memory.
+
+        Accepts two calling conventions:
+          save_scan(subnet: str, hosts: Dict, scan_duration: float)  — legacy
+          save_scan(record: ScanRecord)                               — direct
+
         Args:
-            subnet: e.g., "192.168.1.0/24"
-            hosts: {ip: DiscoveredHost objects}
-            scan_duration: time taken to scan
-        
+            subnet_or_record: either a subnet string or a ScanRecord instance
+            hosts: {ip: DiscoveredHost objects or dicts}  (ignored when first arg is ScanRecord)
+            scan_duration: time taken to scan in seconds  (ignored when first arg is ScanRecord)
+
         Returns:
-            Redis key identifier
+            Storage key identifier (prefix indicates backend used)
         """
-        # Convert DiscoveredHost objects to dicts
-        hosts_dict = {}
-        for ip, host in hosts.items():
-            if hasattr(host, '__dict__'):
-                hosts_dict[ip] = host.__dict__
-            else:
-                hosts_dict[ip] = host
-        
-        # Create record
-        timestamp = datetime.utcnow().isoformat() + 'Z'
-        
-        record = ScanRecord(
-            timestamp=timestamp,
-            subnet=subnet,
-            hosts=hosts_dict,
-            total_hosts_discovered=len(hosts),
-            total_open_ports=sum(len(h.get('open_ports', [])) for h in hosts_dict.values()),
-            total_filtered_ports=sum(len(h.get('filtered_ports', [])) for h in hosts_dict.values()),
-            scan_duration_seconds=scan_duration
-        )
-        
-        # Primary: Save to Redis
+        # --- Normalize to a ScanRecord ---
+        if isinstance(subnet_or_record, ScanRecord):
+            record = subnet_or_record
+            timestamp = record.timestamp
+            subnet = record.subnet
+            serialized = self._serialize_record(record)
+        else:
+            subnet = subnet_or_record
+            hosts = hosts or {}
+            # Convert DiscoveredHost objects to dicts
+            hosts_dict = {}
+            for ip, host in hosts.items():
+                if hasattr(host, '__dict__'):
+                    hosts_dict[ip] = host.__dict__
+                else:
+                    hosts_dict[ip] = host
+
+            timestamp = datetime.utcnow().isoformat() + 'Z'
+
+            record = ScanRecord(
+                timestamp=timestamp,
+                subnet=subnet,
+                hosts=hosts_dict,
+                total_hosts_discovered=len(hosts),
+                total_open_ports=sum(len(h.get('open_ports', [])) for h in hosts_dict.values()),
+                total_filtered_ports=sum(len(h.get('filtered_ports', [])) for h in hosts_dict.values()),
+                scan_duration_seconds=scan_duration,
+            )
+            serialized = self._serialize_record(record)
+
+        # --- Primary: Redis ---
         if self.redis_available:
             subnet_safe = self._sanitize_subnet(subnet)
             redis_key = f"scan:{subnet_safe}:{timestamp}"
-            serialized = self._serialize_record(record)
-            
             try:
                 self.redis_client.setex(redis_key, self.REDIS_TTL_SECONDS, serialized)
                 logger.info(f"[💾] Scan persisted to Redis (TTL: 48h): {redis_key}")
                 result_key = redis_key
             except Exception as e:
-                logger.error(f"[!] Redis save failed: {e}; using memory cache")
-                if subnet not in self.memory_cache:
-                    self.memory_cache[subnet] = []
-                self.memory_cache[subnet].append(record)
-                result_key = f"memory:{timestamp}"
+                logger.error(f"[!] Redis save failed: {e}; trying SQLite WAL")
+                result_key = self._save_fallback(record, timestamp, subnet)
+
+        # --- Fallback: SQLite WAL ---
+        elif self._sqlite is not None:
+            try:
+                self._sqlite.save(record)
+                result_key = f"sqlite:{timestamp}"
+                logger.info(f"[💾] Scan persisted to SQLite WAL: {self._db_path}")
+            except Exception as e:
+                logger.error(f"[!] SQLite save failed: {e}; using memory cache")
+                result_key = self._save_memory(record, subnet, timestamp)
+
+        # --- Last resort: in-memory ---
         else:
-            # Fallback: In-memory only (if Redis down)
-            if subnet not in self.memory_cache:
-                self.memory_cache[subnet] = []
-            self.memory_cache[subnet].append(record)
-            logger.info(f"[💾] Scan persisted to memory (Redis unavailable): {timestamp}")
-            result_key = f"memory:{timestamp}"
-        
-        # Secondary: Archive to BlackVault (if enabled)
+            result_key = self._save_memory(record, subnet, timestamp)
+
+        # --- Secondary: BlackVault archive (always attempt if enabled) ---
         if self.archive_to_vault:
             try:
                 vault_key = f"scan_archive:{subnet}:{timestamp}"
@@ -173,15 +310,44 @@ class ScanPersistence:
                 logger.warning(f"[!] BlackVault archive failed: {e}")
         
         return result_key
-    
+
+    def _save_fallback(self, record: "ScanRecord", timestamp: str, subnet: str) -> str:
+        """Try SQLite WAL then in-memory when Redis write fails mid-operation."""
+        if self._sqlite is not None:
+            try:
+                self._sqlite.save(record)
+                return f"sqlite:{timestamp}"
+            except Exception as exc:
+                logger.error("[!] SQLite fallback save failed: %s; using memory", exc)
+        return self._save_memory(record, subnet, timestamp)
+
+    def _save_memory(self, record: "ScanRecord", subnet: str, timestamp: str) -> str:
+        """Append record to in-memory cache."""
+        if subnet not in self.memory_cache:
+            self.memory_cache[subnet] = []
+        self.memory_cache[subnet].append(record)
+        logger.info("[💾] Scan persisted to in-memory cache (volatile): %s", timestamp)
+        return f"memory:{timestamp}"
+
+    def vacuum_old_records(self, days: int = 7) -> int:
+        """
+        Prune SQLite records older than *days* days.
+        No-op when backend != 'sqlite'.  Returns number of rows deleted.
+        """
+        if self._sqlite is None:
+            return 0
+        deleted = self._sqlite.vacuum(days=days)
+        logger.info("[🧹] SQLite vacuum: removed %d records older than %d days", deleted, days)
+        return deleted
+
     def load_scan(self, subnet: str, scan_index: int = 0) -> Optional[ScanRecord]:
         """
-        Load a scan from Redis.
-        
+        Load a scan.
+
         Args:
             subnet: e.g., "192.168.1.0/24"
             scan_index: 0 = most recent, 1 = 2nd most recent, etc.
-        
+
         Returns:
             ScanRecord or None if not found
         """
@@ -189,48 +355,58 @@ class ScanPersistence:
         if not history or len(history) <= scan_index:
             return None
         return history[scan_index]
-    
+
     def get_scan_history(self, subnet: str, limit: int = 10) -> List[ScanRecord]:
-        """Get recent scans for a subnet from Redis"""
+        """Get recent scans for a subnet.  Priority: Redis → SQLite WAL → in-memory."""
         results = []
-        
-        # Try Redis first
+
+        # --- Redis ---
         if self.redis_available:
             try:
                 subnet_safe = self._sanitize_subnet(subnet)
                 pattern = f"scan:{subnet_safe}:*"
                 keys = self.redis_client.keys(pattern)
-                
-                # Sort by timestamp (descending, most recent first)
+
                 def extract_timestamp(key):
                     parts = key.split(':')
                     return parts[-1] if len(parts) > 2 else ''
-                
+
                 keys_sorted = sorted(keys, key=extract_timestamp, reverse=True)[:limit]
-                
+
                 for key in keys_sorted:
                     try:
                         serialized = self.redis_client.get(key)
                         if serialized:
-                            record = self._deserialize_record(serialized)
-                            results.append(record)
+                            results.append(self._deserialize_record(serialized))
                     except Exception as e:
                         logger.warning(f"[!] Failed to deserialize {key}: {e}")
-                
+
                 if results:
                     logger.debug(f"[✓] Loaded {len(results)} scans from Redis for {subnet}")
                     return results
             except Exception as e:
-                logger.warning(f"[!] Redis query failed: {e}; trying memory cache")
-        
-        # Fallback: In-memory cache
+                logger.warning(f"[!] Redis query failed: {e}; trying SQLite/memory")
+
+        # --- SQLite WAL ---
+        if self._sqlite is not None:
+            try:
+                results = self._sqlite.load(subnet, limit=limit)
+                if results:
+                    logger.debug("[✓] Loaded %d scans from SQLite for %s", len(results), subnet)
+                    return results
+            except Exception as exc:
+                logger.warning("[!] SQLite load failed: %s; trying memory cache", exc)
+
+        # --- In-memory ---
         if subnet in self.memory_cache:
-            results = sorted(self.memory_cache[subnet], key=lambda r: r.timestamp, reverse=True)[:limit]
+            results = sorted(
+                self.memory_cache[subnet], key=lambda r: r.timestamp, reverse=True
+            )[:limit]
             logger.debug(f"[✓] Loaded {len(results)} scans from memory for {subnet}")
             return results
-        
+
         return []
-    
+
     def compute_drift(self, subnet: str, current_hosts: Dict) -> Dict:
         """
         Compare current scan against previous scan from Redis.

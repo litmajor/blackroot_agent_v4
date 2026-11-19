@@ -17,7 +17,7 @@ import dnstwist
 from Crypto.Random import get_random_bytes
 from fastapi import FastAPI
 
-from .resilience import CircuitBreaker, ChecksumCache, make_canary
+from .resilience import CircuitBreaker, CircuitBreakerRegistry, ChecksumCache, make_canary
 from swarm_mesh import SwarmMesh
 from core.redis_client import get_redis_client
 from core.redis_config import RedisDB
@@ -161,22 +161,31 @@ class ReconModule:
         found = []
         base_len = None
         try:
-            base = self.session.get(target, headers=self._get_random_headers(), timeout=8, 
-                                  proxies=self._get_random_proxy(), verify=False)
+            base = self.circuit.call(
+                self.session.get, target, headers=self._get_random_headers(), timeout=8, 
+                proxies=self._get_random_proxy(), verify=False
+            )
             base_len = len(base.content)
+        except RuntimeError:
+            self.logger.warning(f"Circuit OPEN – skipping base check for {target}")
         except Exception:
             self.logger.warning(f"Failed to get base content length for {target}")
 
         def check_path(path: str) -> Optional[str]:
             url = urljoin(target, f"/{path}")
             try:
-                r = self.session.get(url, headers=self._get_random_headers(), timeout=8, 
-                                   proxies=self._get_random_proxy(), verify=False)
+                r = self.circuit.call(
+                    self.session.get, url, headers=self._get_random_headers(), timeout=8, 
+                    proxies=self._get_random_proxy(), verify=False
+                )
                 if base_len and abs(len(r.content) - base_len) < 32:
                     return None
                 if r.status_code < 400:
                     self.logger.info(f"Found: {url} (status {r.status_code}, size {len(r.content)})")
                     return url
+                return None
+            except RuntimeError:
+                self.logger.warning(f"Circuit OPEN – skipping path {url}")
                 return None
             except Exception:
                 return None
@@ -210,8 +219,10 @@ class ReconModule:
         with self.lock:
             for url in endpoints:
                 try:
-                    r = self.session.get(url, headers=self._get_random_headers(), timeout=8, 
-                                       proxies=self._get_random_proxy())
+                    r = self.circuit.call(
+                        self.session.get, url, headers=self._get_random_headers(), timeout=8, 
+                        proxies=self._get_random_proxy()
+                    )
                     soup = BeautifulSoup(r.text, "html.parser")
                     forms = [f for f in soup.find_all("form") if isinstance(f, Tag)]
                     for idx, form in enumerate(forms):
@@ -228,25 +239,35 @@ class ReconModule:
                             try:
                                 target_url = urljoin(base_url or url, action)
                                 if method == "post":
-                                    resp = self.session.post(target_url, data=data, 
-                                                           headers=self._get_random_headers(), 
-                                                           timeout=8, proxies=self._get_random_proxy())
+                                    resp = self.circuit.call(
+                                        self.session.post, target_url, data=data, 
+                                        headers=self._get_random_headers(), 
+                                        timeout=8, proxies=self._get_random_proxy()
+                                    )
                                 else:
                                     # Ensure keys are str for params
                                     safe_data = {str(k): v for k, v in data.items() if k is not None}
-                                    resp = self.session.get(target_url, params=safe_data, 
-                                                          headers=self._get_random_headers(), 
-                                                          timeout=8, proxies=self._get_random_proxy())
+                                    resp = self.circuit.call(
+                                        self.session.get, target_url, params=safe_data, 
+                                        headers=self._get_random_headers(), 
+                                        timeout=8, proxies=self._get_random_proxy()
+                                    )
                                 inj_results.append({
                                     "payload": payload, 
                                     "status": resp.status_code, 
                                     "error": resp.status_code >= 400 or any(e in resp.text.lower() 
                                                                           for e in ["error", "exception"])
                                 })
+                            except RuntimeError:
+                                self.logger.warning(f"Circuit OPEN during form test on {target_url}")
+                                inj_results.append({"payload": payload, "status": None, "error": True,
+                                                    "exception": "Circuit OPEN"})
                             except Exception as e:
                                 inj_results.append({"payload": payload, "status": None, "error": True, 
                                                   "exception": str(e)})
                         results[form_id] = inj_results
+                except RuntimeError:
+                    self.logger.warning(f"Circuit OPEN – skipping form harvest at {url}")
                 except Exception as e:
                     self.logger.error(f"Form harvest error at {url}: {e}")
                     self.vault.store(f"form_error_{time.time()}", 
@@ -278,12 +299,17 @@ class ReconModule:
         
         def scan_url(url: str) -> bool:
             try:
-                r = self.session.get(url, headers=self._get_random_headers(), timeout=8, 
-                                   proxies=self._get_random_proxy())
+                r = self.circuit.call(
+                    self.session.get, url, headers=self._get_random_headers(), timeout=8, 
+                    proxies=self._get_random_proxy()
+                )
                 for payload in XSS_PAYLOADS:
                     if payload in r.text:
                         self.logger.info(f"Potential XSS found at {url} with payload: {payload}")
                         return True
+                return False
+            except RuntimeError:
+                self.logger.warning(f"Circuit OPEN – skipping XSS scan for {url}")
                 return False
             except Exception as e:
                 self.logger.error(f"XSS scan failed for {url}: {e}")
@@ -549,12 +575,16 @@ class ReconModule:
 
 def fetch_crtsh_subdomains(domain: str) -> List[str]:
     """Fetches subdomains from crt.sh."""
+    cb = CircuitBreakerRegistry.get("crtsh", failure_limit=3, timeout=120)
     try:
-        r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=10)
+        r = cb.call(requests.get, f"https://crt.sh/?q=%25.{domain}&output=json", timeout=10)
         if r.status_code == 200:
             return list({sub.strip() for entry in r.json() 
                         for sub in entry.get('name_value', '').split('\n') 
                         if sub.endswith(domain)})
+        return []
+    except RuntimeError:
+        logging.getLogger('ReconModule').warning("Circuit OPEN for crt.sh – skipping")
         return []
     except Exception as e:
         logging.getLogger('ReconModule').error(f"crt.sh error: {e}")
@@ -562,12 +592,19 @@ def fetch_crtsh_subdomains(domain: str) -> List[str]:
 
 def fetch_certspotter_subdomains(domain: str) -> List[str]:
     """Fetches subdomains from certspotter."""
+    cb = CircuitBreakerRegistry.get("certspotter", failure_limit=3, timeout=120)
     try:
-        r = requests.get(f"https://api.certspotter.com/v1/issuances?domain={domain}&include_subdomains=true&expand=dns_names", 
-                        timeout=10)
+        r = cb.call(
+            requests.get,
+            f"https://api.certspotter.com/v1/issuances?domain={domain}&include_subdomains=true&expand=dns_names", 
+            timeout=10
+        )
         if r.status_code == 200:
             return list({sub.strip() for entry in r.json() 
                         for sub in entry.get('dns_names', []) if sub.endswith(domain)})
+        return []
+    except RuntimeError:
+        logging.getLogger('ReconModule').warning("Circuit OPEN for certspotter – skipping")
         return []
     except Exception as e:
         logging.getLogger('ReconModule').error(f"certspotter error: {e}")
