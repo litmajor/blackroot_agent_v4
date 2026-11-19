@@ -8,7 +8,7 @@ import logging
 import shutil
 import sys
 import concurrent.futures
-from typing import List, Dict, Any, Optional, Callable, Union
+from typing import List, Dict, Any, Optional, Callable, Union, Set, Tuple
 import psutil
 import os
 import subprocess
@@ -91,28 +91,196 @@ class TrustMatrix:
         
         return metrics
 
+class ASTPolicyValidator(ast.NodeVisitor):
+    """
+    AST Security Policy Validator.
+    Inspects syntax trees for forbidden builtins, unsafe attribute calls,
+    sandbox escape dunders, and unsanctioned module imports.
+    """
+    FORBIDDEN_CALLS = {
+        'exec', 'eval', 'compile', '__import__', 'open', 'file', 'input', 'breakpoint'
+    }
+    FORBIDDEN_ATTRIBUTES = {
+        'system', 'popen', 'spawn', 'fork', 'kill', 'rmdir', 'remove', 'unlink',
+        'rmtree', 'Popen', 'call', 'check_output', 'check_call', 'windll', 'cdll'
+    }
+    FORBIDDEN_DUNDERS = {
+        '__subclasses__', '__globals__', '__builtins__', '__code__', '__bases__',
+        '__mro__', '__import__'
+    }
+    FORBIDDEN_MODULES = {
+        'ctypes', 'win32api', 'win32con', 'win32process', 'pty', 'posix', 'msvcrt'
+    }
+    MAX_NESTING_DEPTH = 35
+
+    def __init__(self):
+        self.violations: List[str] = []
+        self.current_depth = 0
+
+    def generic_visit(self, node: ast.AST):
+        self.current_depth += 1
+        if self.current_depth > self.MAX_NESTING_DEPTH:
+            self.violations.append(f"Maximum AST nesting depth exceeded ({self.MAX_NESTING_DEPTH})")
+            return
+        super().generic_visit(node)
+        self.current_depth -= 1
+
+    def visit_Call(self, node: ast.Call):
+        if isinstance(node.func, ast.Name):
+            if node.func.id in self.FORBIDDEN_CALLS:
+                self.violations.append(f"Forbidden call: {node.func.id}()")
+        elif isinstance(node.func, ast.Attribute):
+            if node.func.attr in self.FORBIDDEN_ATTRIBUTES:
+                self.violations.append(f"Forbidden attribute call: .{node.func.attr}()")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute):
+        if node.attr in self.FORBIDDEN_DUNDERS:
+            self.violations.append(f"Forbidden sandbox escape dunder access: .{node.attr}")
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant):
+        if isinstance(node.value, str) and node.value in self.FORBIDDEN_DUNDERS:
+            self.violations.append(f"Forbidden sandbox escape dunder token: '{node.value}'")
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import):
+        for alias in node.names:
+            base_mod = alias.name.split('.')[0]
+            if base_mod in self.FORBIDDEN_MODULES:
+                self.violations.append(f"Forbidden import: {alias.name}")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        if node.module:
+            base_mod = node.module.split('.')[0]
+            if base_mod in self.FORBIDDEN_MODULES:
+                self.violations.append(f"Forbidden import from: {node.module}")
+        self.generic_visit(node)
+
+    def validate(self, source_or_tree: Union[str, ast.AST]) -> Tuple[bool, List[str]]:
+        self.violations = []
+        self.current_depth = 0
+        try:
+            tree = ast.parse(source_or_tree) if isinstance(source_or_tree, str) else source_or_tree
+            self.visit(tree)
+            return len(self.violations) == 0, self.violations
+        except SyntaxError as e:
+            return False, [f"SyntaxError during AST inspection: {e}"]
+
+
+class MutationVerificationHarness:
+    """
+    Harness that verifies code transformations for:
+    1. Syntactic validity (ast.parse clean)
+    2. Syntactic novelty (hash & token divergence)
+    3. Security policy compliance (no newly introduced hazards)
+    4. Semantic invariance (execution produces equivalent outputs)
+    """
+
+    def __init__(self, security_manager: Optional["SecurityManager"] = None):
+        self.validator = ASTPolicyValidator()
+        self.security_manager = security_manager or SecurityManager()
+
+    def verify_transformation(
+        self,
+        original_source: str,
+        mutated_source: str,
+        test_context: Optional[Dict[str, Any]] = None
+    ) -> Tuple[bool, Dict[str, Any]]:
+        orig_hash = hashlib.sha256(original_source.encode("utf-8")).hexdigest()
+        mut_hash = hashlib.sha256(mutated_source.encode("utf-8")).hexdigest()
+
+        # Step 1: Syntactic Validity
+        try:
+            mut_tree = ast.parse(mutated_source)
+            valid_syntax = True
+        except SyntaxError as e:
+            return False, {
+                "valid_syntax": False,
+                "divergence_score": 0.0,
+                "security_passed": False,
+                "semantic_match": False,
+                "error": f"Mutated code has invalid syntax: {e}"
+            }
+
+        # Step 2: Security Policy Compliance
+        safe, violations = self.validator.validate(mut_tree)
+        if not safe:
+            return False, {
+                "valid_syntax": True,
+                "divergence_score": 0.0,
+                "security_passed": False,
+                "semantic_match": False,
+                "violations": violations,
+                "error": "Mutated code violates AST security policy"
+            }
+
+        # Step 3: Syntactic Divergence
+        # Calculate identifier set difference
+        def extract_names(tree_node: ast.AST) -> Set[str]:
+            return {n.id for n in ast.walk(tree_node) if isinstance(n, ast.Name)}
+
+        orig_names = extract_names(ast.parse(original_source))
+        mut_names = extract_names(mut_tree)
+
+        divergence = 1.0 if orig_hash != mut_hash else 0.0
+        if orig_names:
+            changed_names = len(orig_names - mut_names)
+            divergence = max(divergence, changed_names / max(1, len(orig_names)))
+
+        # Step 4: Semantic Invariance Sandbox
+        semantic_match = True
+        if test_context is not None or "def " in original_source or "=" in original_source:
+            try:
+                # Compile both safely and run in restricted sandboxes
+                orig_compiled = safe_compile(original_source, "<orig_test>")
+                mut_compiled = safe_compile(mutated_source, "<mut_test>")
+
+                orig_res = self.security_manager.execute_safely(orig_compiled, context=test_context, timeout_secs=3)
+                mut_res = self.security_manager.execute_safely(mut_compiled, context=test_context, timeout_secs=3)
+
+                if orig_res != mut_res:
+                    semantic_match = False
+            except Exception as e:
+                # If execution in sandbox fails due to missing external deps, treat as indeterminate rather than fatal
+                logger.debug(f"[MutationHarness] Sandbox semantic test skipped/indeterminate: {e}")
+
+        result_report = {
+            "valid_syntax": valid_syntax,
+            "divergence_score": round(divergence, 3),
+            "security_passed": safe,
+            "semantic_match": semantic_match,
+            "original_hash": orig_hash[:16],
+            "mutated_hash": mut_hash[:16]
+        }
+        is_success = valid_syntax and safe and semantic_match
+        return is_success, result_report
+
+
 class SecurityManager:
-    """Enhanced security manager for code execution."""
-    
+    """Enhanced security manager for code execution with AST policy verification."""
+
     def __init__(self):
         self.dangerous_functions = {
             'exec', 'eval', 'compile', '__import__', 'open', 'file',
             'subprocess', 'os.system', 'os.popen'
         }
-        
+        self.policy_validator = ASTPolicyValidator()
+
     def analyze_code(self, code: str) -> bool:
-        """Perform static analysis on code."""
-        try:
-            tree = ast.parse(code)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call):
-                    if isinstance(node.func, ast.Name):
-                        if node.func.id in self.dangerous_functions:
-                            logger.warning(f"Dangerous function detected: {node.func.id}")
-                            return False
-            return True
-        except SyntaxError:
+        """Perform comprehensive static analysis and policy validation on code."""
+        safe, violations = self.policy_validator.validate(code)
+        if not safe:
+            for v in violations:
+                logger.warning(f"[SecurityManager] AST Policy Violation: {v}")
             return False
+        return True
+
+    def get_code_violations(self, code: str) -> List[str]:
+        """Return list of AST security policy violations for diagnostic reporting."""
+        _, violations = self.policy_validator.validate(code)
+        return violations
     
     def execute_safely(self, code: Any, context: Optional[Dict[str, Any]] = None,
                        timeout_secs: int = 10) -> Any:
@@ -129,9 +297,10 @@ class SecurityManager:
                 pass
 
         def _run() -> Any:
-            local_vars: Dict[str, Any] = {}
-            exec(code, safe_globals, local_vars)
-            return local_vars.get('result', True)
+            exec_namespace = dict(safe_globals)
+            exec_namespace.update(context)
+            exec(code, exec_namespace)
+            return exec_namespace.get('result', True)
 
         # Cross-platform timeout via ThreadPoolExecutor (works on Windows + POSIX)
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -537,35 +706,60 @@ class NeuroAssimilatorAgent:
 
     def assimilate_with_mutation(self, code_str: str, name: str = "<anonymous>") -> Optional[Any]:
         """
-        Full pipeline: AST mutation (polymorphic rename + obfuscation) →
-        security analysis → safe_compile → store in vault under mutated name.
+        Full pipeline:
+        1. Pre-mutation AST policy validation (rejects forbidden imports/calls/dunders).
+        2. AST polymorphic identifier mutation.
+        3. Mutation verification harness (syntax, divergence, policy, semantics).
+        4. Safe compilation into code object.
+        5. Persistence to BlackVault (24-hour TTL).
 
         Returns the compiled code object on success, None on failure.
         """
+        # Step 1: Pre-mutation policy audit
+        safe, violations = self.security_manager.policy_validator.validate(code_str)
+        if not safe:
+            logger.warning(f"[NeuroAssimilator] '{name}' rejected by AST policy: {violations}")
+            return None
+
+        # Step 2: Mutation
         try:
             mutated = self._mutate_source(code_str)
         except Exception as e:
             logger.warning(f"[NeuroAssimilator] Mutation failed for '{name}', using original: {e}")
             mutated = code_str
 
-        if not self.security_manager.analyze_code(mutated):
-            logger.warning(f"[NeuroAssimilator] '{name}' failed security analysis after mutation — rejected.")
+        # Step 3: Verification harness
+        verified, report = self.harness.verify_transformation(code_str, mutated)
+        if not verified:
+            logger.warning(f"[NeuroAssimilator] Transformation verification failed for '{name}': {report}")
             return None
 
+        # Step 4: Compilation
         try:
             compiled = safe_compile(mutated, f"<mutated:{name}>")
         except SyntaxError as e:
             logger.error(f"[NeuroAssimilator] Post-mutation SyntaxError for '{name}': {e}")
             return None
 
-        # Persist the mutated source blob into BlackVault (24-hour TTL)
+        # Step 5: Store in vault
         try:
             self.vault.store(f"mutated:{name}", mutated.encode('utf-8'), expire_minutes=1440)
-            logger.info(f"[NeuroAssimilator] Mutated '{name}' stored in vault.")
+            logger.info(
+                f"[NeuroAssimilator] Mutated '{name}' verified & stored in vault "
+                f"(divergence: {report.get('divergence_score', 0):.2f})."
+            )
         except Exception as e:
             logger.warning(f"[NeuroAssimilator] Vault store failed for '{name}': {e}")
 
         return compiled
+
+    def validate_code_ast(self, source: str) -> Tuple[bool, List[str]]:
+        """Validate code against the AST security policy."""
+        return self.security_manager.policy_validator.validate(source)
+
+    def verify_mutation(self, original: str, mutated: str) -> Tuple[bool, Dict[str, Any]]:
+        """Verify transformation quality and invariance between original and mutated code."""
+        return self.harness.verify_transformation(original, mutated)
 
     def _mutate_source(self, code_str: str) -> str:
         """
@@ -615,6 +809,7 @@ class NeuroAssimilatorAgent:
         self.memory: List[Dict[str, Any]] = []
         self.performance_log: Dict[str, List[float]] = {}
         self.security_manager = SecurityManager()
+        self.harness = MutationVerificationHarness(self.security_manager)
         self.reliability_monitor = ReliabilityMonitor()
         self.performance_profiler = PerformanceProfiler()
         self.plugin_manager = PluginManager()

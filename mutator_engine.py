@@ -33,6 +33,7 @@ class AdvancedIdentifierRenamer(ast.NodeTransformer):
         # Common standard library imports and modules
         excluded.update([
             'self', 'super', 'cls', # Special Python identifiers
+            'result', 'main', 'execute', 'handler', 'run', # Common entrypoints / execution return keys
             'os', 'sys', 'json', 'hashlib', 'base64', 'time', 'datetime', 'timedelta',
             'random', 'string', 're', 'zlib', 'inspect', 'threading', 'socket',
             'queue', 'redis', 'typing', 'List', 'Dict', 'Union', 'Optional', # Common library names
@@ -82,19 +83,6 @@ class AdvancedIdentifierRenamer(ast.NodeTransformer):
             return new_name
         return original_name # Don't rename if excluded, all caps, or chance not met
 
-    def visit(self, node):
-        """Override visit to manage scope for renaming."""
-        # Push current scope onto stack
-        self.scope_stack.append(self.current_scope_renaming_map)
-        self.current_scope_renaming_map = {} # New scope for current node's children
-
-        # Perform the actual visit
-        new_node = super().visit(node)
-
-        # Pop scope from stack
-        self.current_scope_renaming_map = self.scope_stack.pop()
-        return new_node
-
     def visit_Name(self, node: ast.Name) -> ast.Name:
         """
         Visits Name nodes (variables, function calls, etc.).
@@ -117,54 +105,67 @@ class AdvancedIdentifierRenamer(ast.NodeTransformer):
                         node.id = scope_map[original_name]
                         break
 
-        # self.generic_visit(node) # Handled by the overridden visit method
         return node
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        """Visits function definitions."""
+        """Visits function definitions with proper lexical scoping."""
         original_name = node.name
 
-        # Rename the function itself (its definition)
+        # Rename the function itself in the enclosing scope
         node.name = self._get_new_name(original_name)
 
-        # Rename arguments within the function's new scope
+        # Push scope for function body
+        self.scope_stack.append(self.current_scope_renaming_map)
+        self.current_scope_renaming_map = {}
+
+        # Rename arguments within the function's local scope
         for arg in node.args.args:
             arg.arg = self._get_new_name(arg.arg)
-        if node.args.vararg: # *args
+        if node.args.vararg:
             node.args.vararg.arg = self._get_new_name(node.args.vararg.arg)
-        if node.args.kwarg: # **kwargs
+        if node.args.kwarg:
             node.args.kwarg.arg = self._get_new_name(node.args.kwarg.arg)
 
-        # The `visit` method (overridden) will call generic_visit for the body
+        # Visit body statements within local scope
+        node.body = [self.visit(stmt) for stmt in node.body]
+
+        # Pop local scope
+        self.current_scope_renaming_map = self.scope_stack.pop()
         return node
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
-        """Visits async function definitions (same logic as regular functions)."""
+        """Visits async function definitions with proper lexical scoping."""
         original_name = node.name
 
-        # Rename the async function itself
         node.name = self._get_new_name(original_name)
 
-        # Rename arguments within the async function's new scope
+        self.scope_stack.append(self.current_scope_renaming_map)
+        self.current_scope_renaming_map = {}
+
         for arg in node.args.args:
             arg.arg = self._get_new_name(arg.arg)
-        if node.args.vararg:  # *args
+        if node.args.vararg:
             node.args.vararg.arg = self._get_new_name(node.args.vararg.arg)
-        if node.args.kwarg:  # **kwargs
+        if node.args.kwarg:
             node.args.kwarg.arg = self._get_new_name(node.args.kwarg.arg)
 
-        # The overridden visit method will call generic_visit for the body
+        node.body = [self.visit(stmt) for stmt in node.body]
+
+        self.current_scope_renaming_map = self.scope_stack.pop()
         return node
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
-        """Visits class definitions."""
+        """Visits class definitions with proper lexical scoping."""
         original_name = node.name
 
-        # Rename the class itself
         node.name = self._get_new_name(original_name)
 
-        # The `visit` method (overridden) will handle traversing into methods and class attributes,
-        # which will be handled by visit_FunctionDef and visit_Name respectively.
+        self.scope_stack.append(self.current_scope_renaming_map)
+        self.current_scope_renaming_map = {}
+
+        node.body = [self.visit(stmt) for stmt in node.body]
+
+        self.current_scope_renaming_map = self.scope_stack.pop()
         return node
 
     def rename_identifiers(self, code: str) -> str:
