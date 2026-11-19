@@ -9,6 +9,10 @@ import sys
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 def test_propagation_injection():
     """Verify C2_IP injection in propagation_agents.py"""
     print("\n" + "="*70)
@@ -78,7 +82,7 @@ def test_run_py_exists():
     print("="*70)
     
     try:
-        run_py = Path(__file__).parent / "run.py"
+        run_py = PROJECT_ROOT / "run.py"
         
         if run_py.exists():
             print(f"✅ run.py exists at: {run_py}")
