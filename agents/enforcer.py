@@ -267,7 +267,8 @@ class EnforcerAgent:
         enforcement_engine: EnforcementEngineInterface,
         economic_layer: EconomicLayerInterface,
         command_control: CommandControlInterface,
-        constitution_reference: Dict[str, Any]
+        constitution_reference: Dict[str, Any],
+        bond: Optional[Any] = None
     ):
         self.codename = "SHADOW-BLADE"
         self.agent_id = "ENFORCER.AGENT"
@@ -299,6 +300,16 @@ class EnforcerAgent:
 
         self.logger = logging.getLogger(f"{self.codename}")
 
+        # CreatorBond integration
+        if bond is not None:
+            self.bond = bond
+        else:
+            try:
+                from kernel.creator_bond import CreatorBond
+                self.bond = CreatorBond.instance()
+            except ImportError:
+                self.bond = None
+
         # Economic Layer: Wallet registration
         try:
             from agents.accountant import ACCLedger
@@ -321,8 +332,8 @@ class EnforcerAgent:
             self.logger.info("Rule Engine initialized")
         
         if MISSION_APPROVAL_AVAILABLE and self.rule_engine and callable(get_mission_approval_engine):
-            self.mission_approval_engine = get_mission_approval_engine(self.rule_engine)
-            self.logger.info("Mission Approval Engine initialized")
+            self.mission_approval_engine = get_mission_approval_engine(self.rule_engine, bond=self.bond)
+            self.logger.info("Mission Approval Engine initialized with CreatorBond")
         
         if PENALTY_CALC_AVAILABLE and callable(get_penalty_calculator):
             self.penalty_calculator = get_penalty_calculator()
@@ -403,6 +414,39 @@ class EnforcerAgent:
         if action is None:
             self.logger.error("Anomaly missing 'action'; skipping evaluation.")
             return
+
+        # Gate 0: CreatorBond authorization & kill-switch check
+        if self.bond is not None:
+            allowed, bond_reason = self.bond.authorize_mission(str(action), agent_id)
+            if not allowed:
+                self.logger.critical(f"CreatorBond authorization breach by {agent_id}: {bond_reason}")
+                if RULE_ENGINE_AVAILABLE and self.rule_engine:
+                    from laws.rule_engine import RuleViolation, ConstitutionalRule
+                    gov_rule = self.rule_engine.get_rule("GOV-001") or ConstitutionalRule(
+                        rule_id="GOV-001",
+                        category="governance",
+                        principle="Creator Sovereignty is Absolute",
+                        description=f"Action rejected by CreatorBond: {bond_reason}",
+                        conditions=[str(action)],
+                        severity_base=5,
+                        penalty_amount=500.0,
+                        restrictions=["mission_execution"],
+                        affected_roles=["all"]
+                    )
+                    bond_violation = RuleViolation(
+                        rule=gov_rule,
+                        agent_id=agent_id,
+                        action=str(action),
+                        context=context,
+                        severity=10,
+                        matched_conditions=[str(action)],
+                        evidence={
+                            "reason": bond_reason,
+                            "autonomy_level": self.bond.governor.level.name if hasattr(self.bond, "governor") else "UNKNOWN"
+                        }
+                    )
+                    self._process_violation_sync(bond_violation)
+                    return
 
         # Phase 2.5: Check against constitutional rules first
         if RULE_ENGINE_AVAILABLE and self.rule_engine:
@@ -500,6 +544,26 @@ class EnforcerAgent:
         """
         context = context or {}
         
+        # Gate 0: CreatorBond pre-flight check at Enforcer level
+        if self.bond is not None:
+            allowed, bond_reason = self.bond.authorize_mission(mission_name, agent_id)
+            if not allowed:
+                denial_justification = f"CreatorBond Gate Rejection: {bond_reason}"
+                self._record_mission_denial(mission_id, agent_id, denial_justification)
+                decision_dict = {
+                    "mission_id": mission_id,
+                    "mission_name": mission_name,
+                    "agent_id": agent_id,
+                    "status": ApprovalStatus.DENIED.value if hasattr(ApprovalStatus, "DENIED") else "denied",
+                    "decision_timestamp": datetime.utcnow().isoformat(),
+                    "rule_violations": [],
+                    "risk_assessment": None,
+                    "conditions": [],
+                    "justification": denial_justification,
+                    "approver_id": "CREATOR-BOND",
+                }
+                return decision_dict
+
         # Phase 2.5: Check rule violations
         if MISSION_APPROVAL_AVAILABLE and self.mission_approval_engine:
             approval_decision = self.mission_approval_engine.evaluate_mission(
@@ -1204,7 +1268,8 @@ async def deploy_enforcer_agent(
     enforcement_engine: EnforcementEngineInterface,
     economic_layer: EconomicLayerInterface,
     command_control: CommandControlInterface,
-    constitution: Dict[str, Any]
+    constitution: Dict[str, Any],
+    bond: Optional[Any] = None
 ) -> EnforcerAgent:
     """
     Deploy the SHADOW-BLADE enforcer agent.
@@ -1217,7 +1282,8 @@ async def deploy_enforcer_agent(
         enforcement_engine=enforcement_engine,
         economic_layer=economic_layer,
         command_control=command_control,
-        constitution_reference=constitution
+        constitution_reference=constitution,
+        bond=bond
     )
     
     # Monitor is now automatically started via TaskRunner in __init__

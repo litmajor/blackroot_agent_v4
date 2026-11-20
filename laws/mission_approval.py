@@ -95,14 +95,23 @@ class ApprovalDecision:
 class MissionApprovalEngine:
     """Evaluate and approve/deny missions based on constitutional rules."""
     
-    def __init__(self, rule_engine: Optional['RuleEngine'] = None):
+    def __init__(self, rule_engine: Optional['RuleEngine'] = None, bond: Optional[Any] = None):
         """
         Initialize mission approval engine.
         
         Args:
             rule_engine: RuleEngine instance (creates new if None)
+            bond: CreatorBond instance (defaults to CreatorBond.instance() if available)
         """
         self.rule_engine = rule_engine or RuleEngine()
+        if bond is not None:
+            self.bond = bond
+        else:
+            try:
+                from kernel.creator_bond import CreatorBond
+                self.bond = CreatorBond.instance()
+            except ImportError:
+                self.bond = None
         self.approval_history: List[ApprovalDecision] = []
         self.risk_thresholds = {
             RiskLevel.LOW: (0, 25),
@@ -136,6 +145,28 @@ class MissionApprovalEngine:
         
         log.info(f"Evaluating mission {mission_id} ({mission_name}) for agent {agent_id}")
         
+        # Gate 0: CreatorBond Autonomy & Kill-Switch Validation (First Gate)
+        if self.bond is not None:
+            allowed, bond_reason = self.bond.authorize_mission(mission_name, agent_id)
+            if not allowed:
+                log.warning(
+                    f"Mission {mission_id} ({mission_name}) rejected by CreatorBond: {bond_reason}"
+                )
+                decision = ApprovalDecision(
+                    mission_id=mission_id,
+                    mission_name=mission_name,
+                    agent_id=agent_id,
+                    status=ApprovalStatus.DENIED,
+                    decision_timestamp=datetime.utcnow().isoformat(),
+                    rule_violations=[],
+                    risk_assessment=None,
+                    conditions=[],
+                    justification=f"CreatorBond Gate Rejection: {bond_reason}",
+                    approver_id="CREATOR-BOND",
+                )
+                self.approval_history.append(decision)
+                return decision
+
         # Step 1: Check for rule violations
         violations = self._check_rule_violations(mission_name, agent_id, mission_parameters, context)
         
@@ -428,6 +459,9 @@ class MissionApprovalEngine:
         return (approved, denied, approval_rate)
 
 
-def get_mission_approval_engine(rule_engine: Optional[RuleEngine] = None) -> MissionApprovalEngine:
+def get_mission_approval_engine(
+    rule_engine: Optional[RuleEngine] = None,
+    bond: Optional[Any] = None,
+) -> MissionApprovalEngine:
     """Factory function for MissionApprovalEngine singleton."""
-    return MissionApprovalEngine(rule_engine=rule_engine)
+    return MissionApprovalEngine(rule_engine=rule_engine, bond=bond)
