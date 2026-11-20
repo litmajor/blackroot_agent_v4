@@ -21,4 +21,8 @@ c2-routing.db
 logs/
 pki/
 data/*.db
+*.jsonl
+*.log
 *.db
+*.jsonl
+*.log
