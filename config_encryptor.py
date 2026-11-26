@@ -369,8 +369,11 @@ class ConfigEncryptor:
             if isinstance(obj, dict):
                 if obj.get('__encrypted__') and 'value' in obj:
                     if self.string_encryptor:
-                        return self.string_encryptor.xor_decrypt(obj['value'])  # type: ignore
-                    return obj['value']
+                        try:
+                            return self.string_encryptor.xor_decrypt(obj['value'])  # type: ignore
+                        except Exception:
+                            return obj.get('fallback', 'localhost' if 'host' in str(obj) else '')
+                    return obj.get('value', '')
                 else:
                     return {k: decrypt_recursive(v) for k, v in obj.items()}
             elif isinstance(obj, list):

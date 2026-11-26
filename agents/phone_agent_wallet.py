@@ -15,8 +15,17 @@ class PhoneWalletAgent(BaseAgent):
     def __init__(self):
         super().__init__(codename="PX-WALLET")
         self.agent_id = f"PW-{uuid.uuid4().hex[:8]}"
-        from redis import Redis
-        self.wallet_manager = WalletManager(redis_client=Redis())
+        try:
+            from core.redis_client import get_redis_client
+            r_client = get_redis_client()
+            self.wallet_manager = WalletManager(redis_client=r_client)
+        except Exception:
+            try:
+                from redis import Redis
+                self.wallet_manager = WalletManager(redis_client=Redis())
+            except Exception as exc:
+                logging.getLogger("PhoneWalletAgent").warning(f"WalletManager init fallback: {exc}")
+                self.wallet_manager = None
         self.phone_seed = None
         self.host_map = {}
         self.stealth_manager = StealthManager()

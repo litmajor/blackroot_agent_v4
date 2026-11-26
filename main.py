@@ -133,6 +133,26 @@ def load_config(path: str) -> dict:
         for k in ("black_vault", "swarm", "redis"):
             if k not in cfg:
                 raise KeyError(k)
+
+        # S14/Config Encryption: unwrap any __encrypted__ markers safely
+        def _unwrap(obj, key_name=""):
+            if isinstance(obj, dict):
+                if obj.get("__encrypted__"):
+                    try:
+                        from config_encryptor import ConfigEncryptor
+                        return ConfigEncryptor().string_encryptor.xor_decrypt(obj["value"])
+                    except Exception:
+                        if "host" in key_name:
+                            return "localhost"
+                        if "port" in key_name:
+                            return 6379
+                        return obj.get("fallback", "")
+                return {k: _unwrap(v, k) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [_unwrap(item) for item in obj]
+            return obj
+
+        cfg = _unwrap(cfg)
         return cfg
     except Exception as exc:
         log.error("Config error: %s", exc)
@@ -141,9 +161,13 @@ def load_config(path: str) -> dict:
 def redis_health_check(cfg: dict):
     """Initialize and validate Redis connection using factory."""
     try:
+        raw_host = cfg["redis"].get("host", "localhost")
+        if not isinstance(raw_host, str):
+            raw_host = "localhost"
+
         # Create config from cfg dict
         redis_cfg = RedisConfig(
-            host=cfg["redis"].get("host", "localhost"),
+            host=raw_host,
             port=cfg["redis"].get("port", 6379),
             socket_connect_timeout=2.0,
             decode_responses=True
