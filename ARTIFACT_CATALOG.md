@@ -61,7 +61,7 @@ Every vault `store()` call with a `target_id` in metadata automatically:
 | **What it grants** | A valid Azure AD Primary Refresh Token (PRT) provides seamless SSO across **all** M365 services — Exchange, SharePoint, Teams, Azure portal, Dynamics 365, Workday, NetSuite, Salesforce — without credentials or MFA prompts |
 | **EDR detection** | Low — blobs are DPAPI-encrypted and sit in standard MS profile paths; no process injection required to enumerate |
 | **Privilege needed** | User (read own cache) · Admin (read all users) |
-| **Exploitation path** | Extract encrypted blob → DPAPI decrypt (or relay via `PRT Cookie` abuse using `ROADtoken` / `AADInternals`) → craft seamless SSO auth cookie → access financial portals |
+| **Exploitation path** | Extract encrypted blob → DPAPI decrypt (or relay via `PRT Cookie` abuse using `ROADtoken` / `AADInternals`) → craft seamless SSO auth cookie → access financial portals. See detailed operational steps in [playbook_azure_prt.md](docs/playbooks/playbook_azure_prt.md). |
 | **Downstream artifacts** | Unlocks Workday payroll exports, SharePoint contract libraries, Azure billing subscriptions, Dynamics finance modules |
 | **Collector** | `ghost_layer_financial._collect_azure_prt()` |
 | **Classifier keyword** | `azure_prt`, `prt_cache`, `wam_cache`, `cloudap`, `msal`, `tokenbroker` |
@@ -80,7 +80,7 @@ Every vault `store()` call with a `target_id` in metadata automatically:
 | **What it grants** | Direct control of on-chain treasury wallets; ability to redeploy / drain smart contracts; access to Infura/Alchemy node quotas used for production |
 | **EDR detection** | None — static files, no process interaction |
 | **Privilege needed** | User |
-| **Exploitation path** | Extract `DEPLOYER_PRIVATE_KEY` → import into MetaMask or `cast` (Foundry) → drain deployer wallet; or enumerate `INFURA_API_KEY` → access all RPC calls to monitor mempool / inject txs |
+| **Exploitation path** | Extract `DEPLOYER_PRIVATE_KEY` → import into MetaMask or `cast` (Foundry) → drain deployer wallet; or enumerate `INFURA_API_KEY` → access all RPC calls to monitor mempool / inject txs. See operational guide in [playbook_web3_treasury.md](docs/playbooks/playbook_web3_treasury.md). |
 | **Downstream artifacts** | On-chain wallet seed access; smart contract admin keys; API billing account takeover |
 | **Collector** | `ghost_layer_financial._collect_web3_developer_secrets()` |
 | **Classifier keyword** | `solana/id.json`, `foundry_keystore`, `infura_api`, `alchemy_key`, `deployer_private`, `web3_developer` |
@@ -99,7 +99,7 @@ Every vault `store()` call with a `target_id` in metadata automatically:
 | **What it grants** | Full payment API access — issue charges, initiate refunds, enumerate all customer payment methods, access full transaction history, trigger webhook callbacks |
 | **EDR detection** | None — static key strings in source |
 | **Privilege needed** | User |
-| **Exploitation path** | Stripe `sk_live_` → `stripe customers list` → enumerate stored cards → charge arbitrary amounts; or `stripe payouts create` to redirect future payouts to attacker bank account |
+| **Exploitation path** | Stripe `sk_live_` → `stripe customers list` → enumerate stored cards → charge arbitrary amounts; or `stripe payouts create` to redirect future payouts to attacker bank account. See triage steps in [playbook_payment_gateways.md](docs/playbooks/playbook_payment_gateways.md). |
 | **Downstream artifacts** | Customer PII + payment history; payout bank account details; webhook endpoints for future injection |
 | **Collector** | `ghost_layer_financial._collect_payment_gateway_keys()` |
 | **Classifier keyword** | `sk_live_`, `stripe_key`, `payment_gateway`, `paypal_secret`, `square_token`, `plaid_secret`, `twilio_auth` |
@@ -137,7 +137,7 @@ Every vault `store()` call with a `target_id` in metadata automatically:
 | **What it grants** | Full payroll routing numbers, company IBANs, beneficiary account lists, real-time corporate balance snapshots, all vendor wire details |
 | **EDR detection** | None — plaintext or XML file read |
 | **Privilege needed** | User (treasury analyst context) |
-| **Exploitation path** | Extract NACHA file → parse routing/account numbers → register identical account at receiving bank → submit duplicate ACH entry; or modify beneficiary in future batch |
+| **Exploitation path** | Extract NACHA file → parse routing/account numbers → register identical account at receiving bank → submit duplicate ACH entry; or modify beneficiary in future batch. Full byte layout in [playbook_banking_batches.md](docs/playbooks/playbook_banking_batches.md). |
 | **Downstream artifacts** | Complete vendor payment list; employee payroll IBAN list; corporate bank balance |
 | **Collector** | `ghost_layer_financial._collect_banking_files()` |
 | **Classifier keyword** | `.ach`, `nacha`, `swift`, `mt940`, `mt101`, `sepa`, `banking_batch`, `wire_transfer`, `iban` |
@@ -213,7 +213,7 @@ Every vault `store()` call with a `target_id` in metadata automatically:
 | **What it grants** | Active workspace sessions — Slack token allows read/write to all channels, file access, DM history; Teams token grants M365 SSO; brokerage tokens allow trade execution API calls |
 | **EDR detection** | Low — standard Electron app profile path access |
 | **Privilege needed** | User |
-| **Exploitation path** | Extract Slack `xoxs-` token from LevelDB → `slack-history-export` → enumerate all messages; or Teams token → Microsoft Graph API access to calendar, email, files |
+| **Exploitation path** | Extract Slack `xoxs-` / `xoxp-` token from LevelDB → `slack-history-export` → enumerate all messages; or Teams token → Microsoft Graph API access to calendar, email, files. Full operational workflow in [playbook_electron_tokens.md](docs/playbooks/playbook_electron_tokens.md). |
 | **Downstream artifacts** | Sensitive DMs containing credentials; shared files with financial data; calendar intel for social engineering |
 | **Collector** | `ghost_layer_financial._collect_electron_sessions()` |
 | **Classifier keyword** | `electron_session`, `slack_session`, `teams_session`, `electron` |
