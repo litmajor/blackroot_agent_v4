@@ -102,39 +102,37 @@ def test_mission_approval_engine_gate0_kill_switch_active(clean_bond_sovereign):
     assert "Kill switch is active" in decision.justification
 
 
-def test_enforcer_agent_evaluate_mission_for_approval_gate0(clean_bond_tethered):
+@pytest.mark.asyncio
+async def test_enforcer_agent_evaluate_mission_for_approval_gate0(clean_bond_tethered):
     """Verify that EnforcerAgent.evaluate_mission_for_approval enforces CreatorBond gate."""
-    async def _run():
-        mock_ee = MagicMock()
-        mock_el = MagicMock()
-        mock_cc = MagicMock()
-        constitution = {"blackroot_constitution": {"governance": {}, "agents": []}}
+    mock_ee = MagicMock()
+    mock_el = MagicMock()
+    mock_cc = MagicMock()
+    constitution = {"blackroot_constitution": {"governance": {}, "agents": []}}
 
-        enforcer = EnforcerAgent(
-            enforcement_engine=mock_ee,
-            economic_layer=mock_el,
-            command_control=mock_cc,
-            constitution_reference=constitution,
-            bond=clean_bond_tethered
+    enforcer = EnforcerAgent(
+        enforcement_engine=mock_ee,
+        economic_layer=mock_el,
+        command_control=mock_cc,
+        constitution_reference=constitution,
+        bond=clean_bond_tethered
+    )
+
+    try:
+        decision = await enforcer.evaluate_mission_for_approval(
+            mission_id="enf-prop-01",
+            mission_name="propagate",
+            agent_id="rogue_propagator",
+            mission_parameters={"target": "192.168.1.1"}
         )
 
-        try:
-            decision = await enforcer.evaluate_mission_for_approval(
-                mission_id="enf-prop-01",
-                mission_name="propagate",
-                agent_id="rogue_propagator",
-                mission_parameters={"target": "192.168.1.1"}
-            )
-
-            assert decision["status"] == "denied"
-            assert decision["approver_id"] == "CREATOR-BOND"
-            assert "CreatorBond Gate Rejection" in decision["justification"]
-            assert len(enforcer.denial_log) > 0
-            assert enforcer.denial_log[-1]["mission_id"] == "enf-prop-01"
-        finally:
-            enforcer.shutdown(timeout=1.0)
-
-    asyncio.run(_run())
+        assert decision["status"] == "denied"
+        assert decision["approver_id"] == "CREATOR-BOND"
+        assert "CreatorBond Gate Rejection" in decision["justification"]
+        assert len(enforcer.denial_log) > 0
+        assert enforcer.denial_log[-1]["mission_id"] == "enf-prop-01"
+    finally:
+        enforcer.shutdown(timeout=1.0)
 
 
 def test_enforcer_agent_anomaly_creator_bond_breach(clean_bond_tethered):
@@ -165,3 +163,54 @@ def test_enforcer_agent_anomaly_creator_bond_breach(clean_bond_tethered):
         assert len(enforcer.violation_log) > 0 or len(enforcer.sanction_log) > 0
     finally:
         enforcer.shutdown(timeout=1.0)
+
+
+def test_cli_bond_generate_identity_and_status(tmp_path, capsys):
+    """Verify blackroot.cmd_bond --generate-identity and --status work cleanly."""
+    import argparse
+    import json
+    import blackroot
+
+    args_gen = argparse.Namespace(generate_identity=True, out_dir=str(tmp_path), status=False)
+    blackroot.cmd_bond(args_gen)
+    out = capsys.readouterr().out
+    assert "Ed25519 Creator Identity Generated" in out
+
+    pub_file = tmp_path / "creator_identity.json"
+    priv_file = tmp_path / "creator_private.key"
+    assert pub_file.exists()
+    assert priv_file.exists()
+    pub_data = json.loads(pub_file.read_text(encoding="utf-8"))
+    assert len(pub_data["public_key_hex"]) == 64
+
+    args_status = argparse.Namespace(generate_identity=False, status=True)
+    blackroot.cmd_bond(args_status)
+    out_status = capsys.readouterr().out
+    assert "Autonomy Level:" in out_status
+    assert "Kill Switch:" in out_status
+
+
+def test_cli_start_oath_exits_on_kill_switch(monkeypatch, capsys):
+    """Verify cmd_start with --oath binds BondAwareShogunOathCore and exits when kill_switch fires."""
+    import argparse
+    import threading
+    import time
+    import blackroot
+    from kernel.creator_bond import CreatorBond
+
+    bond = CreatorBond(initial_level=AutonomyLevel.TETHERED)
+    monkeypatch.setattr(CreatorBond, "instance", classmethod(lambda cls: bond))
+
+    def _fire_soon():
+        time.sleep(0.15)
+        bond.kill_switch.fire(reason="test_shutdown")
+
+    threading.Thread(target=_fire_soon, daemon=True).start()
+
+    args = argparse.Namespace(
+        all=False, c2=False, dns=False, agents=False, orchestrate=False, oath=True
+    )
+    blackroot.cmd_start(args)
+    out = capsys.readouterr().out
+    assert "BondAwareShogunOathCore bound" in out
+    assert "KillSwitch triggered" in out

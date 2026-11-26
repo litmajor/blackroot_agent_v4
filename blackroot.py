@@ -231,12 +231,84 @@ def cmd_start(args):
         except Exception as e:
             print(f"[!] Mission Orchestrator error: {e}")
 
+    # 5. Bond-Aware Shogun Oath Core (CreatorBond Watchdog)
+    bond = None
+    if getattr(args, 'oath', False) or args.all:
+        try:
+            from kernel.creator_bond import CreatorBond, BondAwareShogunOathCore
+            bond = CreatorBond.instance()
+
+            def _oath_heartbeat():
+                pass
+
+            oath_core = BondAwareShogunOathCore(task_fn=_oath_heartbeat, bond=bond, loop_delay=2.0)
+            oath_core.bind()
+            print(f"[✓] BondAwareShogunOathCore bound (Autonomy: {bond.governor.level.name})")
+        except Exception as e:
+            print(f"[!] BondAwareShogunOathCore error: {e}")
+
     print("\nServices operational. Press Ctrl+C to terminate.")
     try:
         while True:
+            if bond is not None and bond.kill_switch.is_dead:
+                print("\n[!] CreatorBond KillSwitch triggered — terminating services...")
+                break
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n[!] Shutting down services...")
+
+
+# ── Command: Creator Bond ────────────────────────────────────────────────────
+
+def cmd_bond(args):
+    from kernel.creator_bond import CreatorBond, CreatorIdentity
+    import json
+    from pathlib import Path
+
+    print("=" * 68)
+    print("                    CREATOR BOND & IDENTITY LAYER                  ")
+    print("=" * 68)
+
+    if getattr(args, "generate_identity", False):
+        identity, priv_raw = CreatorIdentity.generate_ephemeral()
+        out_dir = Path(args.out_dir).expanduser() if getattr(args, "out_dir", None) else (Path.home() / ".blackroot")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        pub_path = out_dir / "creator_identity.json"
+        pub_data = {
+            "creator_id": identity.creator_id,
+            "public_key_hex": identity.public_key_hex,
+            "created_at": identity.created_at,
+        }
+        pub_path.write_text(json.dumps(pub_data, indent=2), encoding="utf-8")
+
+        print(f"\n  [✓] Ed25519 Creator Identity Generated")
+        print(f"  Creator ID:     {identity.creator_id}")
+        print(f"  Public Key Hex: {identity.public_key_hex}")
+        print(f"  Public Record:  {pub_path}")
+
+        if priv_raw is not None:
+            priv_path = out_dir / "creator_private.key"
+            priv_path.write_text(priv_raw.hex(), encoding="utf-8")
+            try:
+                os.chmod(priv_path, 0o600)
+            except OSError:
+                pass
+            print(f"  Private Key:    {priv_path} (KEEP SECRET — store in BlackVault)")
+        else:
+            print("  [!] cryptography package unavailable; ephemeral placeholder generated.")
+        print("\n" + "=" * 68)
+        return
+
+    bond = CreatorBond.instance()
+    st = bond.status()
+    print(f"\n  Creator ID:       {st['creator_id']}")
+    print(f"  Autonomy Level:   {st['governor']['level']}")
+    print(f"  Kill Switch:      {'DEAD (Triggered)' if st['kill_switch']['is_dead'] else 'ARMED (Alive)'}")
+    print(f"  Identity Bound:   {'✓ Yes' if st['identity_bound'] else '✗ No (Dev/Open Mode)'}")
+    print(f"  Crypto (Ed25519): {'✓ Available' if st['crypto_available'] else '✗ Warn-Only'}")
+    print(f"  Creator Silence:  {st['dead_man_switch']['silence_seconds']:.1f}s")
+    print("\n" + "=" * 68)
 
 
 # ── Command: Simulate Full Lifecycle (Option 1) ──────────────────────────────
@@ -435,10 +507,18 @@ def main():
     p_start.add_argument("--dns", action="store_true", help="Start UDP DNS tunnel listener")
     p_start.add_argument("--agents", action="store_true", help="Start autonomous swarm kernel")
     p_start.add_argument("--orchestrate", action="store_true", help="Start autonomous mission orchestrator")
+    p_start.add_argument("--oath", action="store_true", help="Start BondAwareShogunOathCore watchdog")
     p_start.add_argument("--target", type=str, default="192.168.1.100", help="Target for orchestrated mission")
     p_start.add_argument("--port", type=int, default=8000, help="C2 HTTP port (default: 8000)")
     p_start.add_argument("--dns-port", type=int, default=5353, help="DNS UDP port (default: 5353)")
     p_start.set_defaults(func=cmd_start)
+
+    # bond
+    p_bond = subparsers.add_parser("bond", help="Creator Bond identity, autonomy level, and kill-switch control")
+    p_bond.add_argument("--status", action="store_true", help="Show Creator Bond status")
+    p_bond.add_argument("--generate-identity", action="store_true", help="Generate Ed25519 creator keypair")
+    p_bond.add_argument("--out-dir", type=str, default=None, help="Output directory for generated keypair (default: ~/.blackroot)")
+    p_bond.set_defaults(func=cmd_bond)
 
     # simulate
     p_sim = subparsers.add_parser("simulate", help="Run full end-to-end swarm lifecycle dry run")
