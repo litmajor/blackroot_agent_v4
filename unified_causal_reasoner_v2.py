@@ -455,9 +455,9 @@ class UnifiedCausalReasonerV2:
             # Restore confidence engine state
             if "confidence_engine_state" in learning_state:
                 conf_state = learning_state["confidence_engine_state"]
-                # Update success history with learned data
+                # Update success history with learned historical data quietly
                 for technique in conf_state.get("successful_techniques", []):
-                    self.world.history.record_success(technique)
+                    self.world.history.record_success(technique, quiet=True)
             
             # Restore causal graph weights
             if "causal_graph_weights" in learning_state:

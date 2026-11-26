@@ -225,18 +225,28 @@ class PropagationAgent(BaseAgent):
         if SMB_SCANNER_AVAILABLE and SMBScanner:
             try:
                 self.smb_scanner = SMBScanner(timeout=5)
-                log.info("✅ Phase 1 SMB Scanner initialized for network propagation")
+                if getattr(self.smb_scanner, 'has_impacket', False) or getattr(self.smb_scanner, 'impacket_available', False):
+                    log.info("✅ Phase 1 SMB Scanner initialized (Live Impacket mode)")
+                else:
+                    log.info("ℹ️  Phase 1 SMB Scanner initialized (Degraded/Subprocess mode - impacket absent)")
             except Exception as e:
                 log.warning(f"⚠️  SMB Scanner init failed: {e}")
+        else:
+            log.info("ℹ️  SMB Scanner unavailable (impacket not installed)")
         
         # Phase 2 Integration: Initialize real WMI Executor for remote command execution
         self.wmi_executor = None
         if WMI_EXECUTOR_AVAILABLE and WMIExecutor:
             try:
                 self.wmi_executor = WMIExecutor(timeout=30)
-                log.info("✅ Phase 2 WMI Executor initialized for remote command execution")
+                if getattr(self.wmi_executor, 'has_impacket', False):
+                    log.info("✅ Phase 2 WMI Executor initialized (Full Impacket mode)")
+                else:
+                    log.info("ℹ️  Phase 2 WMI Executor initialized (Subprocess fallback mode)")
             except Exception as e:
                 log.warning(f"⚠️  WMI Executor init failed: {e}")
+        else:
+            log.info("ℹ️  WMI Executor unavailable")
 
 
 

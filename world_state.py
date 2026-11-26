@@ -127,10 +127,11 @@ class DecisionHistory:
         self.failed_techniques.append(technique)
         logger.warning(f"[WorldState] Technique failed: {technique} ({reason})")
     
-    def record_success(self, technique: str):
+    def record_success(self, technique: str, quiet: bool = False):
         """Log successful technique"""
         self.successful_techniques.append(technique)
-        logger.info(f"[WorldState] Technique succeeded: {technique}")
+        if not quiet:
+            logger.info(f"[WorldState] Technique succeeded: {technique}")
     
     def is_technique_viable(self, technique: str) -> bool:
         """Whether technique has been shown to work"""

@@ -171,8 +171,8 @@ class GhostLayer:
         # Initialize causal reasoning engine for strategic credential extraction
         try:
             from causal_decision_engine import CausalDecisionEngine
-            self.causal_engine = CausalDecisionEngine()
-            self.logger.info("[GhostLayer] Causal decision engine initialized")
+            self.causal_engine = CausalDecisionEngine.instance()
+            self.logger.debug("[GhostLayer] Shared causal decision engine attached")
         except ImportError:
             self.causal_engine = None
             self.logger.warning("[GhostLayer] Causal engine not available, using default extraction")

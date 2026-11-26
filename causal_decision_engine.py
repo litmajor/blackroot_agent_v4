@@ -37,7 +37,7 @@ class CausalDecisionEngine:
     Strategic decision maker using causal graphs
     
     Usage:
-        engine = CausalDecisionEngine()
+        engine = CausalDecisionEngine.instance()
         
         # Explain which credentials to extract given threat level
         targets = engine.choose_extraction_targets(
@@ -54,6 +54,14 @@ class CausalDecisionEngine:
         )
         # Returns: ["wmi_persistence"]  (stealth over redundancy)
     """
+    _instance: Optional['CausalDecisionEngine'] = None
+
+    @classmethod
+    def instance(cls) -> 'CausalDecisionEngine':
+        """Get or create singleton instance to avoid duplicate graph allocations."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
     
     def __init__(self):
         # Initialize all causal graphs

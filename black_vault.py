@@ -284,15 +284,22 @@ class BlackVault:
                 # For software simulation, just return the data
                 return sealed_data
             else:
+                # Ensure parent directory exists before creating
+                sealed_dir = os.path.dirname(self.sealed_secret_path)
+                if sealed_dir and not os.path.exists(sealed_dir):
+                    os.makedirs(sealed_dir, exist_ok=True)
                 # Create new sealed secret
                 secret = secrets.token_bytes(32) if hasattr(secrets, 'token_bytes') else (get_random_bytes and get_random_bytes(32)) or os.urandom(32)
                 with open(self.sealed_secret_path, 'wb') as f:
                     f.write(secret)
-                os.chmod(self.sealed_secret_path, 0o600)
+                try:
+                    os.chmod(self.sealed_secret_path, 0o600)
+                except Exception:
+                    pass
                 self.logger.info("Created new sealed secret")
                 return secret
         except Exception as e:
-            self.logger.error(f"Failed to load/create sealed secret: {e}")
+            self.logger.warning(f"Could not load/create sealed secret ({e}); continuing with ephemeral key material")
             return None
 
     def _get_or_create_salt(self) -> bytes:
