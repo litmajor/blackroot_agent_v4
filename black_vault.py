@@ -687,6 +687,22 @@ class BlackVault:
                 # Atomic rename (use replace for Windows compatibility)
                 os.replace(temp_path, path)
                 self.logger.info(f"Stored encrypted artifact: {name}")
+
+                # Update living TargetIdentity profile when target context is present
+                try:
+                    target_id = (metadata or {}).get("target_id")
+                    if not target_id and ":" in name:
+                        target_id = name.split(":", 1)[0]
+                    if target_id:
+                        from recon.target_identity import TargetIdentityRegistry
+                        TargetIdentityRegistry.instance().ingest_extract(
+                            target_id=str(target_id),
+                            artifact_name=name,
+                            metadata=metadata,
+                            agent_id=str((metadata or {}).get("agent_id", "vault_store")),
+                        )
+                except Exception as tid_exc:
+                    self.logger.debug(f"TargetIdentity ingest skipped: {tid_exc}")
                 
             except Exception as e:
                 # Clean up temp file if it exists
