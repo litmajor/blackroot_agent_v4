@@ -8,7 +8,7 @@ from agent_core_anatomy import AgentID, AgentStatus, Mission, Event
 
 # --- Phase 2.4 Mission Implementation Modules ---
 try:
-    from recon.mission_executor import get_mission_executor, MissionExecutor, PatchInfo, ScanResult
+    from recon.mission_executor import get_mission_executor, MissionExecutor, ScanResult
     MISSION_EXECUTOR_AVAILABLE = True
 except ImportError:
     MISSION_EXECUTOR_AVAILABLE = False
