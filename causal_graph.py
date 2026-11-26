@@ -67,10 +67,40 @@ class CausalEdge:
     observations: int = 1  # How many times we've observed this
     last_updated: str = ""  # ISO timestamp of last observation
     tags: List[str] = None  # ["high_threat", "edr_detected", "windows_only"]
-    
+    total_residual_error: float = 0.0  # Sum of absolute prediction residuals
+    mean_absolute_error: float = 0.0  # Running MAE
+
     def __post_init__(self):
         if self.tags is None:
             self.tags = []
+
+    def learn(self, actual_impact: float, predicted_impact: Optional[float] = None, alpha: float = 0.25):
+        """
+        Online residual update via Exponential Moving Average (EMA).
+        Adjusts weight and confidence based on error between prediction and observed reality.
+        """
+        from datetime import datetime
+        self.observations += 1
+        self.last_updated = datetime.utcnow().isoformat()
+
+        # Actual impact absolute value represents observed strength [0.0, 1.0]
+        observed_strength = min(max(abs(actual_impact), 0.0), 1.0)
+        # Update direction if actual sign differs
+        if actual_impact != 0:
+            self.direction = 1 if actual_impact > 0 else -1
+
+        # Prediction residual
+        pred = (self.direction * self.weight * self.confidence) if predicted_impact is None else predicted_impact
+        residual = abs(actual_impact - pred)
+        self.total_residual_error += residual
+        self.mean_absolute_error = self.total_residual_error / self.observations
+
+        # EMA update on weight
+        self.weight = (1.0 - alpha) * self.weight + alpha * observed_strength
+
+        # Confidence update: small residual increases confidence, large residual decreases it
+        accuracy = max(1.0 - residual, 0.0)
+        self.confidence = min(max((1.0 - alpha) * self.confidence + alpha * accuracy, 0.1), 0.99)
     
     def __repr__(self):
         sign = "+" if self.direction > 0 else "-"
@@ -308,6 +338,82 @@ class CausalGraph:
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores
     
+    def learn_from_outcome(
+        self,
+        intervention: str,
+        actual_effects: Dict[str, float],
+        predicted_effects: Optional[Dict[str, float]] = None,
+        alpha: float = 0.25,
+        create_missing: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Online residual learning across all observed effects of an intervention.
+        Updates matching causal edges with EMA adjustments and residual tracking.
+        """
+        results: Dict[str, Any] = {"updated": [], "created": [], "residuals": {}}
+        pred_dict = predicted_effects or self.query_effects(intervention)
+
+        for effect_name, actual_val in actual_effects.items():
+            pred_val = pred_dict.get(effect_name, 0.0)
+            residual = abs(actual_val - pred_val)
+            results["residuals"][effect_name] = residual
+
+            # Find matching edge
+            matched = False
+            for edge in self.edges.get(intervention, []):
+                if edge.effect == effect_name:
+                    edge.learn(actual_impact=actual_val, predicted_impact=pred_val, alpha=alpha)
+                    results["updated"].append(effect_name)
+                    matched = True
+                    break
+
+            if not matched and create_missing:
+                # Dynamically instantiate discovered causal relationship
+                direction = 1 if actual_val >= 0 else -1
+                new_edge = self.add_edge(
+                    cause=intervention,
+                    effect=effect_name,
+                    weight=min(max(abs(actual_val), 0.0), 1.0),
+                    direction=direction,
+                    confidence=0.5,
+                )
+                new_edge.learn(actual_impact=actual_val, predicted_impact=pred_val, alpha=alpha)
+                results["created"].append(effect_name)
+
+        logger.info(
+            f"[CausalGraph:{self.name}] Learned from {intervention}: "
+            f"{len(results['updated'])} updated, {len(results['created'])} created"
+        )
+        return results
+
+    def get_learning_metrics(self) -> Dict[str, Any]:
+        """Observability metrics for convergence, total observations, and MAE."""
+        total_obs = 0
+        total_error = 0.0
+        edge_count = 0
+        per_edge: Dict[str, Dict[str, Any]] = {}
+
+        for cause, edges in self.edges.items():
+            for edge in edges:
+                edge_count += 1
+                total_obs += edge.observations
+                total_error += edge.total_residual_error
+                per_edge[f"{cause}->{edge.effect}"] = {
+                    "weight": round(edge.weight, 4),
+                    "confidence": round(edge.confidence, 4),
+                    "observations": edge.observations,
+                    "mae": round(edge.mean_absolute_error, 4),
+                }
+
+        global_mae = total_error / max(total_obs, 1)
+        return {
+            "graph_name": self.name,
+            "total_edges": edge_count,
+            "total_observations": total_obs,
+            "global_mae": round(global_mae, 4),
+            "edges": per_edge,
+        }
+
     def update_edge(
         self,
         cause: str,

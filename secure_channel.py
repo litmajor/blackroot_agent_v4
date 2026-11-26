@@ -97,35 +97,57 @@ class SecureChannel:
 
     def _start_listener(self):
         def listen():
-            pubsub = self.redis.pubsub()
-            pubsub.subscribe(self.channel)
-            print(f"[SECURE] Listening on {self.channel}")
-            for message in pubsub.listen():
-                if message['type'] == 'message':
-                    self.inbox.put(message['data'])
+            backoff = 2
+            while True:
+                try:
+                    pubsub = self.redis.pubsub()
+                    pubsub.subscribe(self.channel)
+                    print(f"[SECURE] Listening on {self.channel}")
+                    for message in pubsub.listen():
+                        if message['type'] == 'message':
+                            self.inbox.put(message['data'])
+                    backoff = 2
+                except Exception as e:
+                    # Log cleanly without raw traceback storm when Redis is offline
+                    print(f"[SECURE] Channel connection unavailable ({e}); retrying in {backoff}s...")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
 
         threading.Thread(target=listen, daemon=True).start()
 
     def _start_discovery_broadcast(self):
         def announce():
+            backoff = 5
             while True:
-                payload = json.dumps({"node_id": self.node_id})
-                self.redis.publish(self.discovery_channel, payload)
-                time.sleep(10)
+                try:
+                    payload = json.dumps({"node_id": self.node_id})
+                    self.redis.publish(self.discovery_channel, payload)
+                    time.sleep(10)
+                    backoff = 5
+                except Exception as e:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
 
         def receive():
-            pubsub = self.redis.pubsub()
-            pubsub.subscribe(self.discovery_channel)
-            for message in pubsub.listen():
-                if message['type'] == 'message':
-                    try:
-                        data = json.loads(message['data'])
-                        sender_id = data.get("node_id")
-                        if sender_id and sender_id != self.node_id:
-                            self.known_peers.add(sender_id)
-                            print(f"[DISCOVERY] Peer discovered: {sender_id}")
-                    except Exception as e:
-                        print(f"[DISCOVERY] Error: {e}")
+            backoff = 2
+            while True:
+                try:
+                    pubsub = self.redis.pubsub()
+                    pubsub.subscribe(self.discovery_channel)
+                    for message in pubsub.listen():
+                        if message['type'] == 'message':
+                            try:
+                                data = json.loads(message['data'])
+                                sender_id = data.get("node_id")
+                                if sender_id and sender_id != self.node_id:
+                                    self.known_peers.add(sender_id)
+                                    print(f"[DISCOVERY] Peer discovered: {sender_id}")
+                            except Exception as e:
+                                print(f"[DISCOVERY] Error: {e}")
+                    backoff = 2
+                except Exception as e:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
 
         threading.Thread(target=announce, daemon=True).start()
         threading.Thread(target=receive, daemon=True).start()

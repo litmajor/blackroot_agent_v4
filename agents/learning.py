@@ -17,6 +17,22 @@ class LearningAgent(BaseAgent):
         self.interval = int(cfg.get("interval", 60))
         self.stats: Dict[str, int] = {}
         self.last_log = datetime.utcnow()
+        self.attached_graphs: List[Any] = []
+        self.outcome_buffer: List[Dict[str, Any]] = []
+
+        # Try to automatically attach shared CausalDecisionEngine graphs
+        try:
+            from causal_decision_engine import CausalDecisionEngine
+            engine = CausalDecisionEngine.instance()
+            self.attached_graphs.extend([
+                engine.extraction_graph,
+                engine.persistence_graph,
+                engine.c2_graph,
+                engine.injection_graph
+            ])
+            log.info("LearningAgent attached 4 shared causal graphs")
+        except Exception:
+            pass
         # Economic Layer: Wallet registration
         try:
             from agents.accountant import ACCLedger
@@ -46,6 +62,34 @@ class LearningAgent(BaseAgent):
             penalty = Decimal('0.45')
             self.accountant.agent_wallets[str(self.codename)].balance -= penalty
             log.info(f"Burned 0.45 Root from LearningAgent for failed learning.")
+
+    def attach_causal_graph(self, graph: Any) -> None:
+        """Attach a CausalGraph instance for online outcome learning."""
+        if graph not in self.attached_graphs:
+            self.attached_graphs.append(graph)
+            log.info("Attached graph %s to LearningAgent", getattr(graph, "name", "unknown"))
+
+    def record_causal_outcome(
+        self,
+        intervention: str,
+        actual_effects: Dict[str, float],
+        predicted_effects: Optional[Dict[str, float]] = None,
+        alpha: float = 0.25
+    ) -> List[Dict[str, Any]]:
+        """
+        Record observed operational outcome and feed directly into attached causal graphs.
+        """
+        results = []
+        for g in self.attached_graphs:
+            if hasattr(g, "learn_from_outcome"):
+                res = g.learn_from_outcome(
+                    intervention=intervention,
+                    actual_effects=actual_effects,
+                    predicted_effects=predicted_effects,
+                    alpha=alpha
+                )
+                results.append({"graph": getattr(g, "name", "unknown"), "result": res})
+        return results
 
     # ------------------------------------------------------------------
     def run(self):
